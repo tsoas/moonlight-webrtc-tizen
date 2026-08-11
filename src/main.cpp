@@ -1,4 +1,5 @@
 #include "H264AnnexBReader.h"
+#include "OpusFileReader.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -21,9 +22,14 @@ namespace {
 using Json = nlohmann::json;
 
 constexpr std::uint8_t VideoPayloadType = 96;
+constexpr std::uint8_t AudioPayloadType = 111;
 constexpr rtc::SSRC VideoSsrc = 42;
+constexpr rtc::SSRC AudioSsrc = 43;
 constexpr double VideoFrameRate = 60.0;
 constexpr auto VideoSamplePath = "samples/test-720p60.h264";
+constexpr auto AudioSamplePath = "samples/test-tone-48k-stereo.opus";
+constexpr auto RtpCname = "moonlight-webrtc";
+constexpr auto MediaStreamId = "stream1";
 
 struct PendingCandidate {
     std::string candidate;
@@ -56,6 +62,7 @@ struct Session {
     std::shared_ptr<rtc::WebSocket> socket;
     std::shared_ptr<rtc::PeerConnection> peerConnection;
     std::shared_ptr<rtc::Track> videoTrack;
+    std::shared_ptr<rtc::Track> audioTrack;
 
     std::mutex sendMutex;
     std::mutex candidateMutex;
@@ -65,7 +72,8 @@ struct Session {
     std::mutex streamMutex;
     std::condition_variable streamCondition;
     bool peerConnected = false;
-    bool trackOpen = false;
+    bool videoTrackOpen = false;
+    bool audioTrackOpen = false;
     bool stopRequested = false;
     std::thread streamingThread;
 };
@@ -74,6 +82,7 @@ class SignalingServer {
 public:
     SignalingServer()
         : videoSource_(VideoSamplePath)
+        , audioSource_(AudioSamplePath)
         , server_(makeServerConfiguration())
     {
         server_.onClient([this](std::shared_ptr<rtc::WebSocket> socket) {
@@ -84,6 +93,12 @@ public:
             std::ostringstream message;
             message << "Loaded H.264 sample: " << videoSource_.accessUnits().size()
                     << " access units";
+            log(message.str());
+        }
+        {
+            std::ostringstream message;
+            message << "Loaded Opus sample: " << audioSource_.packets().size()
+                    << " encoded packets";
             log(message.str());
         }
         log("WebSocket signaling server listening on 0.0.0.0:8000");
@@ -224,13 +239,13 @@ private:
 
         rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
         video.addH264Codec(VideoPayloadType);
-        video.addSSRC(VideoSsrc, "moonlight-webrtc", "moonlight-test", "video");
+        video.addSSRC(VideoSsrc, RtpCname, MediaStreamId, "video");
 
         session->videoTrack = peerConnection->addTrack(video);
 
         auto rtpConfiguration = std::make_shared<rtc::RtpPacketizationConfig>(
             VideoSsrc,
-            "moonlight-webrtc",
+            RtpCname,
             VideoPayloadType,
             rtc::H264RtpPacketizer::ClockRate);
         auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
@@ -243,7 +258,7 @@ private:
             if (const auto currentSession = weakSession.lock()) {
                 {
                     const std::lock_guard lock(currentSession->streamMutex);
-                    currentSession->trackOpen = true;
+                    currentSession->videoTrackOpen = true;
                 }
                 log("Video track opened");
                 currentSession->streamCondition.notify_all();
@@ -256,19 +271,58 @@ private:
             }
         });
 
+        rtc::Description::Audio audio("audio", rtc::Description::Direction::SendOnly);
+        audio.addOpusCodec(
+            AudioPayloadType,
+            "minptime=20;maxaveragebitrate=128000;stereo=1;sprop-stereo=1;useinbandfec=0");
+        audio.addSSRC(AudioSsrc, RtpCname, MediaStreamId, "audio");
+
+        session->audioTrack = peerConnection->addTrack(audio);
+
+        auto audioRtpConfiguration = std::make_shared<rtc::RtpPacketizationConfig>(
+            AudioSsrc,
+            RtpCname,
+            AudioPayloadType,
+            rtc::OpusRtpPacketizer::DefaultClockRate);
+        auto audioPacketizer =
+            std::make_shared<rtc::OpusRtpPacketizer>(audioRtpConfiguration);
+        audioPacketizer->addToChain(
+            std::make_shared<rtc::RtcpSrReporter>(audioRtpConfiguration));
+        audioPacketizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+        session->audioTrack->setMediaHandler(audioPacketizer);
+
+        session->audioTrack->onOpen([this, weakSession] {
+            if (const auto currentSession = weakSession.lock()) {
+                {
+                    const std::lock_guard lock(currentSession->streamMutex);
+                    currentSession->audioTrackOpen = true;
+                }
+                log("Audio track opened");
+                currentSession->streamCondition.notify_all();
+            }
+        });
+
+        session->audioTrack->onClosed([weakSession] {
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->requestStreamingStop();
+            }
+        });
+
         session->streamingThread = std::thread([this, sessionPointer = session.get()] {
-            streamVideo(*sessionPointer);
+            streamMedia(*sessionPointer);
         });
 
         peerConnection->setLocalDescription();
     }
 
-    void streamVideo(Session& session)
+    void streamMedia(Session& session)
     {
         {
             std::unique_lock lock(session.streamMutex);
             session.streamCondition.wait(lock, [&session] {
-                return session.stopRequested || (session.peerConnected && session.trackOpen);
+                return session.stopRequested
+                    || (session.peerConnected && session.videoTrackOpen
+                        && session.audioTrackOpen);
             });
 
             if (session.stopRequested) {
@@ -277,68 +331,112 @@ private:
         }
 
         log("Video streaming started");
+        log("Audio streaming started");
 
         using Clock = std::chrono::steady_clock;
         const auto streamStart = Clock::now();
-        auto nextReport = streamStart + std::chrono::seconds(1);
-        std::uint64_t framesSent = 0;
-        std::uint64_t bytesSent = 0;
-        std::size_t frameIndex = 0;
+        auto nextVideoReport = streamStart + std::chrono::seconds(1);
+        auto nextAudioReport = streamStart + std::chrono::seconds(1);
+        std::uint64_t videoFramesSent = 0;
+        std::uint64_t videoBytesSent = 0;
+        std::uint64_t audioPacketsSent = 0;
+        std::uint64_t audioBytesSent = 0;
+        std::size_t videoFrameIndex = 0;
+        std::size_t audioPacketIndex = 0;
+        std::chrono::microseconds audioElapsed{0};
 
         while (true) {
             {
                 const std::lock_guard lock(session.streamMutex);
-                if (session.stopRequested || !session.peerConnected || !session.trackOpen) {
+                if (session.stopRequested || !session.peerConnected || !session.videoTrackOpen
+                    || !session.audioTrackOpen) {
                     break;
                 }
             }
 
-            const auto& accessUnit = videoSource_.accessUnits()[frameIndex];
+            const std::chrono::duration<double> videoTimestamp(
+                static_cast<double>(videoFramesSent) / VideoFrameRate);
+            const std::chrono::duration<double> audioTimestamp = audioElapsed;
+            const bool sendVideo = videoTimestamp <= audioTimestamp;
+            const std::chrono::duration<double> mediaTimestamp =
+                sendVideo ? videoTimestamp : audioTimestamp;
+            const auto sendTime = streamStart
+                + std::chrono::duration_cast<Clock::duration>(mediaTimestamp);
+
+            {
+                std::unique_lock lock(session.streamMutex);
+                if (session.streamCondition.wait_until(lock, sendTime, [&session] {
+                        return session.stopRequested || !session.peerConnected
+                            || !session.videoTrackOpen || !session.audioTrackOpen;
+                    })) {
+                    break;
+                }
+            }
+
             try {
-                session.videoTrack->sendFrame(
-                    reinterpret_cast<const rtc::byte*>(accessUnit.data()),
-                    accessUnit.size(),
-                    std::chrono::duration<double>(
-                        static_cast<double>(framesSent) / VideoFrameRate));
+                if (sendVideo) {
+                    const auto& accessUnit = videoSource_.accessUnits()[videoFrameIndex];
+                    session.videoTrack->sendFrame(
+                        reinterpret_cast<const rtc::byte*>(accessUnit.data()),
+                        accessUnit.size(),
+                        videoTimestamp);
+
+                    ++videoFramesSent;
+                    videoBytesSent += accessUnit.size();
+                    ++videoFrameIndex;
+
+                    if (videoFrameIndex == videoSource_.accessUnits().size()) {
+                        videoFrameIndex = 0;
+                        log("Video loop restarted");
+                    }
+                } else {
+                    const auto& packet = audioSource_.packets()[audioPacketIndex];
+                    session.audioTrack->sendFrame(
+                        reinterpret_cast<const rtc::byte*>(packet.data()),
+                        packet.size(),
+                        audioTimestamp);
+
+                    ++audioPacketsSent;
+                    audioBytesSent += packet.size();
+                    audioElapsed += audioSource_.packetDuration(audioPacketIndex);
+                    ++audioPacketIndex;
+
+                    if (audioPacketIndex == audioSource_.packets().size()) {
+                        audioPacketIndex = 0;
+                        log("Audio loop restarted");
+                    }
+                }
             } catch (const std::exception& error) {
-                log("Video streaming error: " + std::string(error.what()));
+                log("Media streaming error: " + std::string(error.what()));
                 session.requestStreamingStop();
                 break;
             }
 
-            ++framesSent;
-            bytesSent += accessUnit.size();
-            ++frameIndex;
-
-            if (frameIndex == videoSource_.accessUnits().size()) {
-                frameIndex = 0;
-                log("Video loop restarted");
-            }
-
             const auto now = Clock::now();
-            if (now >= nextReport) {
+            if (now >= nextVideoReport) {
                 std::ostringstream message;
-                message << "Video streaming: " << framesSent << " frames sent, " << bytesSent
-                        << " bytes";
+                message << "Video streaming: " << videoFramesSent << " frames sent, "
+                        << videoBytesSent << " bytes";
                 log(message.str());
 
                 do {
-                    nextReport += std::chrono::seconds(1);
-                } while (nextReport <= now);
+                    nextVideoReport += std::chrono::seconds(1);
+                } while (nextVideoReport <= now);
             }
+            if (now >= nextAudioReport) {
+                std::ostringstream message;
+                message << "Audio streaming: " << audioPacketsSent << " packets sent, "
+                        << audioBytesSent << " bytes";
+                log(message.str());
 
-            const auto nextFrameTime = streamStart
-                + std::chrono::duration_cast<Clock::duration>(
-                    std::chrono::duration<double>(
-                        static_cast<double>(framesSent) / VideoFrameRate));
-
-            std::unique_lock lock(session.streamMutex);
-            session.streamCondition.wait_until(lock, nextFrameTime, [&session] {
-                return session.stopRequested || !session.peerConnected || !session.trackOpen;
-            });
+                do {
+                    nextAudioReport += std::chrono::seconds(1);
+                } while (nextAudioReport <= now);
+            }
         }
 
         log("Video streaming stopped");
+        log("Audio streaming stopped");
     }
 
     void handleMessage(const std::shared_ptr<Session>& session, const std::string& text)
@@ -429,6 +527,7 @@ private:
     }
 
     moonlight::H264AnnexBReader videoSource_;
+    moonlight::OpusFileReader audioSource_;
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;

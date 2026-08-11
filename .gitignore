@@ -2,3 +2,4 @@ build*/
 .vs/
 out/
 samples/*.h264
+samples/*.opus

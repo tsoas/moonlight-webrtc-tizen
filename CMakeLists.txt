@@ -12,6 +12,13 @@ add_library(h264_annex_b_reader
 target_compile_features(h264_annex_b_reader PUBLIC cxx_std_20)
 target_include_directories(h264_annex_b_reader PUBLIC src)
 
+add_library(opus_file_reader
+    src/OpusFileReader.cpp
+)
+
+target_compile_features(opus_file_reader PUBLIC cxx_std_20)
+target_include_directories(opus_file_reader PUBLIC src)
+
 add_executable(moonlight_webrtc
     src/main.cpp
 )
@@ -19,6 +26,7 @@ add_executable(moonlight_webrtc
 target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
     h264_annex_b_reader
+    opus_file_reader
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
 )
@@ -41,5 +49,16 @@ if(BUILD_TESTING)
         NAME h264_annex_b_inspect
         COMMAND h264_annex_b_inspect
             "${CMAKE_CURRENT_SOURCE_DIR}/samples/test-720p60.h264"
+    )
+
+    add_executable(opus_file_inspect
+        tests/OpusFileReaderTest.cpp
+    )
+    target_link_libraries(opus_file_inspect PRIVATE opus_file_reader)
+
+    add_test(
+        NAME opus_file_inspect
+        COMMAND opus_file_inspect
+            "${CMAKE_CURRENT_SOURCE_DIR}/samples/test-tone-48k-stereo.opus"
     )
 endif()

@@ -3,19 +3,39 @@ const SIGNALING_URL = "ws://192.168.0.69:8000";
 const diagnosticsElement = document.getElementById("diagnostics");
 const logElement = document.getElementById("log");
 const videoElement = document.getElementById("video");
+const playbackPromptElement = document.getElementById("playback-prompt");
 const connectionStateElement = document.getElementById("connection-state");
 const iceStateElement = document.getElementById("ice-state");
+const trackCounts = {
+  remote: document.getElementById("remote-tracks"),
+  video: document.getElementById("video-tracks"),
+  audio: document.getElementById("audio-tracks"),
+};
 const statistics = {
-  framesReceived: document.getElementById("frames-received"),
-  framesDecoded: document.getElementById("frames-decoded"),
-  framesDropped: document.getElementById("frames-dropped"),
-  packetsReceived: document.getElementById("packets-received"),
-  packetsLost: document.getElementById("packets-lost"),
-  bytesReceived: document.getElementById("bytes-received"),
+  video: {
+    framesReceived: document.getElementById("frames-received"),
+    framesDecoded: document.getElementById("frames-decoded"),
+    decodedFps: document.getElementById("decoded-fps"),
+    framesDropped: document.getElementById("frames-dropped"),
+    packetsReceived: document.getElementById("packets-received"),
+    packetsLost: document.getElementById("packets-lost"),
+    bytesReceived: document.getElementById("bytes-received"),
+  },
+  audio: {
+    packetsReceived: document.getElementById("audio-packets-received"),
+    packetsLost: document.getElementById("audio-packets-lost"),
+    bytesReceived: document.getElementById("audio-bytes-received"),
+    jitter: document.getElementById("audio-jitter"),
+  },
 };
 
 const pendingRemoteCandidates = [];
+const remoteStream = new MediaStream();
+videoElement.srcObject = remoteStream;
+videoElement.muted = false;
 let statisticsErrorReported = false;
+let previousDecodedSample = null;
+let playbackErrorReported = false;
 
 function log(message) {
   console.log(message);
@@ -37,6 +57,36 @@ function reportError(context, error) {
   logElement.textContent += message + "\n";
   logElement.scrollTop = logElement.scrollHeight;
 }
+
+function updateTrackCounts() {
+  trackCounts.remote.textContent = remoteStream.getTracks().length;
+  trackCounts.video.textContent = remoteStream.getVideoTracks().length;
+  trackCounts.audio.textContent = remoteStream.getAudioTracks().length;
+}
+
+async function startPlayback() {
+  videoElement.muted = false;
+
+  try {
+    await videoElement.play();
+    playbackPromptElement.hidden = true;
+    if (playbackErrorReported) {
+      log("Playback started after user action");
+    }
+  } catch (error) {
+    playbackPromptElement.hidden = false;
+    if (!playbackErrorReported) {
+      playbackErrorReported = true;
+      reportError("video.play() requires pressing OK", error);
+    }
+  }
+}
+
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Enter" || event.keyCode === 13) {
+    startPlayback();
+  }
+});
 
 let peerConnection;
 try {
@@ -182,17 +232,29 @@ peerConnection.oniceconnectionstatechange = function () {
 };
 
 peerConnection.ontrack = function (event) {
-  videoElement.srcObject = event.streams && event.streams[0]
-    ? event.streams[0]
-    : new MediaStream([event.track]);
-  log("Remote video track received");
+  const alreadyAdded = remoteStream.getTracks().some(function (track) {
+    return track.id === event.track.id;
+  });
 
-  const playback = videoElement.play();
-  if (playback && typeof playback.catch === "function") {
-    playback.catch(function (error) {
-      reportError("video.play() failed", error);
-    });
+  if (!alreadyAdded) {
+    remoteStream.addTrack(event.track);
   }
+
+  const sourceStreamId = event.streams && event.streams[0]
+    ? event.streams[0].id
+    : "none";
+  log("Remote " + event.track.kind + " track received in stream: " + sourceStreamId);
+  updateTrackCounts();
+
+  event.track.addEventListener("ended", function () {
+    const currentTrack = remoteStream.getTrackById(event.track.id);
+    if (currentTrack) {
+      remoteStream.removeTrack(currentTrack);
+      updateTrackCounts();
+    }
+  });
+
+  startPlayback();
 };
 
 function statisticValue(report, name) {
@@ -203,24 +265,67 @@ async function updateStatistics() {
   try {
     const reports = await peerConnection.getStats();
     let inboundVideo = null;
+    let inboundAudio = null;
 
     reports.forEach(function (report) {
       const kind = typeof report.kind === "undefined" ? report.mediaType : report.kind;
       if (report.type === "inbound-rtp" && kind === "video" && !report.isRemote) {
         inboundVideo = report;
+      } else if (report.type === "inbound-rtp" && kind === "audio" && !report.isRemote) {
+        inboundAudio = report;
       }
     });
 
-    if (!inboundVideo) {
-      return;
+    if (inboundVideo) {
+      const framesDecoded = statisticValue(inboundVideo, "framesDecoded");
+      const sampleTime = typeof inboundVideo.timestamp === "number"
+        ? inboundVideo.timestamp
+        : performance.now();
+
+      statistics.video.framesReceived.textContent = statisticValue(
+        inboundVideo,
+        "framesReceived"
+      );
+      statistics.video.framesDecoded.textContent = framesDecoded;
+      statistics.video.framesDropped.textContent = statisticValue(
+        inboundVideo,
+        "framesDropped"
+      );
+      statistics.video.packetsReceived.textContent = statisticValue(
+        inboundVideo,
+        "packetsReceived"
+      );
+      statistics.video.packetsLost.textContent = statisticValue(inboundVideo, "packetsLost");
+      statistics.video.bytesReceived.textContent = statisticValue(
+        inboundVideo,
+        "bytesReceived"
+      );
+
+      if (previousDecodedSample && sampleTime > previousDecodedSample.time) {
+        const elapsedSeconds = (sampleTime - previousDecodedSample.time) / 1000;
+        const decodedFps = (framesDecoded - previousDecodedSample.frames) / elapsedSeconds;
+        statistics.video.decodedFps.textContent = decodedFps.toFixed(1);
+      }
+      previousDecodedSample = {
+        time: sampleTime,
+        frames: framesDecoded,
+      };
     }
 
-    statistics.framesReceived.textContent = statisticValue(inboundVideo, "framesReceived");
-    statistics.framesDecoded.textContent = statisticValue(inboundVideo, "framesDecoded");
-    statistics.framesDropped.textContent = statisticValue(inboundVideo, "framesDropped");
-    statistics.packetsReceived.textContent = statisticValue(inboundVideo, "packetsReceived");
-    statistics.packetsLost.textContent = statisticValue(inboundVideo, "packetsLost");
-    statistics.bytesReceived.textContent = statisticValue(inboundVideo, "bytesReceived");
+    if (inboundAudio) {
+      statistics.audio.packetsReceived.textContent = statisticValue(
+        inboundAudio,
+        "packetsReceived"
+      );
+      statistics.audio.packetsLost.textContent = statisticValue(inboundAudio, "packetsLost");
+      statistics.audio.bytesReceived.textContent = statisticValue(
+        inboundAudio,
+        "bytesReceived"
+      );
+      statistics.audio.jitter.textContent = Number(
+        statisticValue(inboundAudio, "jitter")
+      ).toFixed(6);
+    }
   } catch (error) {
     if (!statisticsErrorReported) {
       statisticsErrorReported = true;

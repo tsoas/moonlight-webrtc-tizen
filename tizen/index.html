@@ -54,6 +54,11 @@
       font-weight: 700;
     }
 
+    h2 {
+      margin: 14px 0 8px;
+      font-size: 18px;
+    }
+
     dl {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -81,17 +86,28 @@
     }
 
     #log {
-      height: 190px;
+      height: 150px;
       margin: 0;
       overflow-y: auto;
       color: #e8e8e8;
       font: 16px/1.4 monospace;
       white-space: pre-wrap;
     }
+
+    #playback-prompt {
+      position: fixed;
+      right: 32px;
+      bottom: 32px;
+      padding: 18px 22px;
+      border-left: 5px solid #ffd54f;
+      background: rgba(0, 0, 0, 0.9);
+      font-size: 24px;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
-  <video id="video" autoplay playsinline muted></video>
+  <video id="video" autoplay playsinline></video>
 
   <section id="diagnostics" aria-label="WebRTC diagnostics">
     <div id="states">
@@ -99,17 +115,36 @@
       <span>ICE: <strong id="ice-state">new</strong></span>
     </div>
 
+    <h2>Remote MediaStream</h2>
+    <dl>
+      <div><dt>Remote tracks</dt><dd id="remote-tracks">0</dd></div>
+      <div><dt>Video tracks</dt><dd id="video-tracks">0</dd></div>
+      <div><dt>Audio tracks</dt><dd id="audio-tracks">0</dd></div>
+    </dl>
+
+    <h2>Video inbound</h2>
     <dl>
       <div><dt>Frames received</dt><dd id="frames-received">0</dd></div>
       <div><dt>Frames decoded</dt><dd id="frames-decoded">0</dd></div>
+      <div><dt>Decoded FPS</dt><dd id="decoded-fps">0</dd></div>
       <div><dt>Frames dropped</dt><dd id="frames-dropped">0</dd></div>
       <div><dt>Packets received</dt><dd id="packets-received">0</dd></div>
       <div><dt>Packets lost</dt><dd id="packets-lost">0</dd></div>
       <div><dt>Bytes received</dt><dd id="bytes-received">0</dd></div>
     </dl>
 
+    <h2>Audio inbound</h2>
+    <dl>
+      <div><dt>Packets received</dt><dd id="audio-packets-received">0</dd></div>
+      <div><dt>Packets lost</dt><dd id="audio-packets-lost">0</dd></div>
+      <div><dt>Bytes received</dt><dd id="audio-bytes-received">0</dd></div>
+      <div><dt>Jitter</dt><dd id="audio-jitter">0</dd></div>
+    </dl>
+
     <pre id="log" aria-live="assertive"></pre>
   </section>
+
+  <div id="playback-prompt" hidden>Press OK to start audio</div>
 
   <script src="app.js"></script>
 </body>
