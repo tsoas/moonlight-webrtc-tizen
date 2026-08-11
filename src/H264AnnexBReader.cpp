@@ -86,6 +86,9 @@ H264AnnexBReader::H264AnnexBReader(const std::filesystem::path& path)
         hasSps_ |= nalType == 7;
         hasPps_ |= nalType == 8;
         hasIdr_ |= nalType == 5;
+        if (nalType == 5 && !firstIdrAccessUnitIndex_) {
+            firstIdrAccessUnitIndex_ = accessUnits_.size();
+        }
 
         if (nalType == 9) {
             if (foundAud && !currentAccessUnit.empty()) {
@@ -113,6 +116,11 @@ H264AnnexBReader::H264AnnexBReader(const std::filesystem::path& path)
 const std::vector<H264AnnexBReader::AccessUnit>& H264AnnexBReader::accessUnits() const
 {
     return accessUnits_;
+}
+
+std::optional<std::size_t> H264AnnexBReader::firstIdrAccessUnitIndex() const
+{
+    return firstIdrAccessUnitIndex_;
 }
 
 bool H264AnnexBReader::hasSps() const

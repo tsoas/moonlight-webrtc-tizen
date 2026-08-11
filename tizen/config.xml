@@ -12,6 +12,7 @@
     <access origin="*" subdomains="true"/>
     <tizen:privilege name="http://tizen.org/privilege/internet"/>
     <tizen:profile name="tv-samsung"/>
+    <tizen:metadata key="http://samsung.com/tv/metadata/use.game.mode" value="true" />
     <tizen:setting screen-orientation="landscape"
                    context-menu="disable"
                    background-support="disable"

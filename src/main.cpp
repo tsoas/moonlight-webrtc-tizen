@@ -1,6 +1,7 @@
 #include "H264AnnexBReader.h"
 #include "OpusFileReader.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -30,6 +32,59 @@ constexpr auto VideoSamplePath = "samples/test-720p60.h264";
 constexpr auto AudioSamplePath = "samples/test-tone-48k-stereo.opus";
 constexpr auto RtpCname = "moonlight-webrtc";
 constexpr auto MediaStreamId = "stream1";
+constexpr std::string_view SamsungGameModeImageAttribute =
+    "imageattr:96 send [x=[1280:1280],y=[720:720],fps=[60:60]]";
+constexpr std::string_view SamsungGameModeSdpLine =
+    "a=imageattr:96 send [x=[1280:1280],y=[720:720],fps=[60:60]]";
+
+bool hasValidSamsungGameModeImageAttribute(std::string_view sdp)
+{
+    for (std::size_t index = 0; index < sdp.size(); ++index) {
+        if ((sdp[index] == '\n' && (index == 0 || sdp[index - 1] != '\r'))
+            || (sdp[index] == '\r'
+                && (index + 1 == sdp.size() || sdp[index + 1] != '\n'))) {
+            return false;
+        }
+    }
+
+    const auto attributePosition = sdp.find(SamsungGameModeSdpLine);
+    if (attributePosition == std::string_view::npos
+        || sdp.find(SamsungGameModeSdpLine,
+                    attributePosition + SamsungGameModeSdpLine.size())
+            != std::string_view::npos
+        || sdp.find("a=imageattr:") != attributePosition
+        || sdp.find("a=imageattr:", attributePosition + 1) != std::string_view::npos) {
+        return false;
+    }
+
+    const bool completeLine =
+        (attributePosition == 0
+         || sdp.substr(attributePosition - 2, 2) == "\r\n")
+        && sdp.substr(attributePosition + SamsungGameModeSdpLine.size(), 2) == "\r\n";
+    const auto videoPosition = sdp.find("m=video ");
+    const auto nextMediaPosition = videoPosition == std::string_view::npos
+        ? std::string_view::npos
+        : sdp.find("\r\nm=", videoPosition + 1);
+
+    return completeLine && videoPosition != std::string_view::npos
+        && attributePosition > videoPosition
+        && (nextMediaPosition == std::string_view::npos
+            || attributePosition < nextMediaPosition);
+}
+
+std::string_view videoMediaSection(std::string_view sdp)
+{
+    const auto videoPosition = sdp.find("m=video ");
+    if (videoPosition == std::string_view::npos) {
+        return {};
+    }
+
+    const auto nextMediaPosition = sdp.find("\r\nm=", videoPosition + 1);
+    return sdp.substr(videoPosition,
+                      nextMediaPosition == std::string_view::npos
+                          ? std::string_view::npos
+                          : nextMediaPosition - videoPosition);
+}
 
 struct PendingCandidate {
     std::string candidate;
@@ -75,6 +130,8 @@ struct Session {
     bool videoTrackOpen = false;
     bool audioTrackOpen = false;
     bool stopRequested = false;
+    std::atomic<bool> videoKeyframeRequested = false;
+    std::atomic<std::uint64_t> keyframeRequestCount = 0;
     std::thread streamingThread;
 };
 
@@ -220,8 +277,19 @@ private:
                 }
 
                 if (const auto currentSession = weakSession.lock()) {
+                    const std::string sdp = std::string(description);
+                    if (!hasValidSamsungGameModeImageAttribute(sdp)) {
+                        log("Samsung Game Mode SDP imageattr validation failed");
+                        currentSession->requestStreamingStop();
+                        currentSession->socket->close();
+                        return;
+                    }
+
+                    log("Samsung Game Mode SDP imageattr enabled");
+                    log("Outgoing SDP m=video section:\n"
+                        + std::string(videoMediaSection(sdp)));
                     sendJson(currentSession,
-                             {{"type", "offer"}, {"sdp", std::string(description)}});
+                             {{"type", "offer"}, {"sdp", sdp}});
                     log("Sent SDP offer");
                 }
             });
@@ -239,6 +307,7 @@ private:
 
         rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
         video.addH264Codec(VideoPayloadType);
+        video.addAttribute(std::string(SamsungGameModeImageAttribute));
         video.addSSRC(VideoSsrc, RtpCname, MediaStreamId, "video");
 
         session->videoTrack = peerConnection->addTrack(video);
@@ -252,6 +321,16 @@ private:
             rtc::NalUnit::Separator::StartSequence, rtpConfiguration);
         packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfiguration));
         packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+        packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, weakSession] {
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->videoKeyframeRequested.store(true, std::memory_order_relaxed);
+                const auto requestNumber = currentSession->keyframeRequestCount.fetch_add(
+                                               1, std::memory_order_relaxed)
+                    + 1;
+                log("RTCP PLI/FIR received: H.264 IDR requested (#"
+                    + std::to_string(requestNumber) + ")");
+            }
+        }));
         session->videoTrack->setMediaHandler(packetizer);
 
         session->videoTrack->onOpen([this, weakSession] {
@@ -375,6 +454,17 @@ private:
 
             try {
                 if (sendVideo) {
+                    const bool keyframeRequested = session.videoKeyframeRequested.exchange(
+                        false, std::memory_order_relaxed);
+                    bool idrScheduled = false;
+                    if (keyframeRequested) {
+                        const auto idrIndex = videoSource_.firstIdrAccessUnitIndex();
+                        if (idrIndex) {
+                            videoFrameIndex = *idrIndex;
+                            idrScheduled = true;
+                        }
+                    }
+
                     const auto& accessUnit = videoSource_.accessUnits()[videoFrameIndex];
                     session.videoTrack->sendFrame(
                         reinterpret_cast<const rtc::byte*>(accessUnit.data()),
@@ -384,6 +474,12 @@ private:
                     ++videoFramesSent;
                     videoBytesSent += accessUnit.size();
                     ++videoFrameIndex;
+
+                    if (idrScheduled) {
+                        log("H.264 IDR sent in response to RTCP PLI/FIR");
+                    } else if (keyframeRequested) {
+                        log("RTCP PLI/FIR response unavailable: sample has no H.264 IDR");
+                    }
 
                     if (videoFrameIndex == videoSource_.accessUnits().size()) {
                         videoFrameIndex = 0;

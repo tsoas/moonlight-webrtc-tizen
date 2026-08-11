@@ -54,6 +54,22 @@
       font-weight: 700;
     }
 
+    #game-mode {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      border: 2px solid #45d483;
+      color: #fff;
+      font-size: 19px;
+      font-weight: 700;
+    }
+
+    #game-mode strong {
+      color: #6df0a4;
+    }
+
     h2 {
       margin: 14px 0 8px;
       font-size: 18px;
@@ -113,6 +129,11 @@
     <div id="states">
       <span>Connection: <strong id="connection-state">new</strong></span>
       <span>ICE: <strong id="ice-state">new</strong></span>
+    </div>
+
+    <div id="game-mode">
+      <strong>GAME MODE: ENABLED</strong>
+      <span>SDP video:<br>1280x720 @ 60</span>
     </div>
 
     <h2>Remote MediaStream</h2>

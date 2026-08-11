@@ -36,6 +36,7 @@ videoElement.muted = false;
 let statisticsErrorReported = false;
 let previousDecodedSample = null;
 let playbackErrorReported = false;
+let rawOfferSdp = "";
 
 function log(message) {
   console.log(message);
@@ -63,6 +64,18 @@ function updateTrackCounts() {
   trackCounts.video.textContent = remoteStream.getVideoTracks().length;
   trackCounts.audio.textContent = remoteStream.getAudioTracks().length;
 }
+
+function updateRemoteTracksForVisibility() {
+  const enabled = !document.hidden;
+  remoteStream.getTracks().forEach(function (track) {
+    track.enabled = enabled;
+  });
+  log(enabled
+    ? "Application foregrounded - media tracks enabled"
+    : "Application backgrounded - media tracks disabled");
+}
+
+document.addEventListener("visibilitychange", updateRemoteTracksForVisibility);
 
 async function startPlayback() {
   videoElement.muted = false;
@@ -133,6 +146,7 @@ async function handleRemoteCandidate(message) {
 }
 
 async function handleOffer(message) {
+  rawOfferSdp = message.sdp;
   try {
     await peerConnection.setRemoteDescription({
       type: "offer",
@@ -232,6 +246,7 @@ peerConnection.oniceconnectionstatechange = function () {
 };
 
 peerConnection.ontrack = function (event) {
+  event.track.enabled = !document.hidden;
   const alreadyAdded = remoteStream.getTracks().some(function (track) {
     return track.id === event.track.id;
   });
