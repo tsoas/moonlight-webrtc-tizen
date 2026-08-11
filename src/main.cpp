@@ -1,9 +1,14 @@
+#include "H264AnnexBReader.h"
+
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -15,12 +20,39 @@ namespace {
 
 using Json = nlohmann::json;
 
+constexpr std::uint8_t VideoPayloadType = 96;
+constexpr rtc::SSRC VideoSsrc = 42;
+constexpr double VideoFrameRate = 30.0;
+constexpr auto VideoSamplePath = "samples/test-720p30.h264";
+
 struct PendingCandidate {
     std::string candidate;
     std::string mid;
 };
 
 struct Session {
+    ~Session()
+    {
+        stopStreaming();
+    }
+
+    void requestStreamingStop()
+    {
+        {
+            const std::lock_guard lock(streamMutex);
+            stopRequested = true;
+        }
+        streamCondition.notify_all();
+    }
+
+    void stopStreaming()
+    {
+        requestStreamingStop();
+        if (streamingThread.joinable()) {
+            streamingThread.join();
+        }
+    }
+
     std::shared_ptr<rtc::WebSocket> socket;
     std::shared_ptr<rtc::PeerConnection> peerConnection;
     std::shared_ptr<rtc::Track> videoTrack;
@@ -29,17 +61,31 @@ struct Session {
     std::mutex candidateMutex;
     bool hasRemoteDescription = false;
     std::vector<PendingCandidate> pendingCandidates;
+
+    std::mutex streamMutex;
+    std::condition_variable streamCondition;
+    bool peerConnected = false;
+    bool trackOpen = false;
+    bool stopRequested = false;
+    std::thread streamingThread;
 };
 
 class SignalingServer {
 public:
     SignalingServer()
-        : server_(makeServerConfiguration())
+        : videoSource_(VideoSamplePath)
+        , server_(makeServerConfiguration())
     {
         server_.onClient([this](std::shared_ptr<rtc::WebSocket> socket) {
             acceptClient(std::move(socket));
         });
 
+        {
+            std::ostringstream message;
+            message << "Loaded H.264 sample: " << videoSource_.accessUnits().size()
+                    << " access units";
+            log(message.str());
+        }
         log("WebSocket signaling server listening on ws://127.0.0.1:8000");
     }
 
@@ -124,11 +170,27 @@ private:
 
         const std::weak_ptr<Session> weakSession = session;
 
-        peerConnection->onStateChange([this](rtc::PeerConnection::State state) {
-            std::ostringstream message;
-            message << "PeerConnection state: " << state;
-            log(message.str());
-        });
+        peerConnection->onStateChange(
+            [this, weakSession](rtc::PeerConnection::State state) {
+                std::ostringstream message;
+                message << "PeerConnection state: " << state;
+                log(message.str());
+
+                if (const auto currentSession = weakSession.lock()) {
+                    {
+                        const std::lock_guard lock(currentSession->streamMutex);
+                        currentSession->peerConnected =
+                            state == rtc::PeerConnection::State::Connected;
+
+                        if (state == rtc::PeerConnection::State::Disconnected
+                            || state == rtc::PeerConnection::State::Failed
+                            || state == rtc::PeerConnection::State::Closed) {
+                            currentSession->stopRequested = true;
+                        }
+                    }
+                    currentSession->streamCondition.notify_all();
+                }
+            });
 
         peerConnection->onIceStateChange([this](rtc::PeerConnection::IceState state) {
             std::ostringstream message;
@@ -161,10 +223,122 @@ private:
         });
 
         rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
-        video.addH264Codec(96);
+        video.addH264Codec(VideoPayloadType);
+        video.addSSRC(VideoSsrc, "moonlight-webrtc", "moonlight-test", "video");
+
         session->videoTrack = peerConnection->addTrack(video);
 
+        auto rtpConfiguration = std::make_shared<rtc::RtpPacketizationConfig>(
+            VideoSsrc,
+            "moonlight-webrtc",
+            VideoPayloadType,
+            rtc::H264RtpPacketizer::ClockRate);
+        auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+            rtc::NalUnit::Separator::StartSequence, rtpConfiguration);
+        packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfiguration));
+        packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+        session->videoTrack->setMediaHandler(packetizer);
+
+        session->videoTrack->onOpen([this, weakSession] {
+            if (const auto currentSession = weakSession.lock()) {
+                {
+                    const std::lock_guard lock(currentSession->streamMutex);
+                    currentSession->trackOpen = true;
+                }
+                log("Video track opened");
+                currentSession->streamCondition.notify_all();
+            }
+        });
+
+        session->videoTrack->onClosed([weakSession] {
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->requestStreamingStop();
+            }
+        });
+
+        session->streamingThread = std::thread([this, sessionPointer = session.get()] {
+            streamVideo(*sessionPointer);
+        });
+
         peerConnection->setLocalDescription();
+    }
+
+    void streamVideo(Session& session)
+    {
+        {
+            std::unique_lock lock(session.streamMutex);
+            session.streamCondition.wait(lock, [&session] {
+                return session.stopRequested || (session.peerConnected && session.trackOpen);
+            });
+
+            if (session.stopRequested) {
+                return;
+            }
+        }
+
+        log("Video streaming started");
+
+        using Clock = std::chrono::steady_clock;
+        const auto streamStart = Clock::now();
+        auto nextReport = streamStart + std::chrono::seconds(1);
+        std::uint64_t framesSent = 0;
+        std::uint64_t bytesSent = 0;
+        std::size_t frameIndex = 0;
+
+        while (true) {
+            {
+                const std::lock_guard lock(session.streamMutex);
+                if (session.stopRequested || !session.peerConnected || !session.trackOpen) {
+                    break;
+                }
+            }
+
+            const auto& accessUnit = videoSource_.accessUnits()[frameIndex];
+            try {
+                session.videoTrack->sendFrame(
+                    reinterpret_cast<const rtc::byte*>(accessUnit.data()),
+                    accessUnit.size(),
+                    std::chrono::duration<double>(
+                        static_cast<double>(framesSent) / VideoFrameRate));
+            } catch (const std::exception& error) {
+                log("Video streaming error: " + std::string(error.what()));
+                session.requestStreamingStop();
+                break;
+            }
+
+            ++framesSent;
+            bytesSent += accessUnit.size();
+            ++frameIndex;
+
+            if (frameIndex == videoSource_.accessUnits().size()) {
+                frameIndex = 0;
+                log("Video loop restarted");
+            }
+
+            const auto now = Clock::now();
+            if (now >= nextReport) {
+                std::ostringstream message;
+                message << "Video streaming: " << framesSent << " frames sent, " << bytesSent
+                        << " bytes";
+                log(message.str());
+
+                do {
+                    nextReport += std::chrono::seconds(1);
+                } while (nextReport <= now);
+            }
+
+            const auto nextFrameTime = streamStart
+                + std::chrono::duration_cast<Clock::duration>(
+                    std::chrono::duration<double>(
+                        static_cast<double>(framesSent) / VideoFrameRate));
+
+            std::unique_lock lock(session.streamMutex);
+            session.streamCondition.wait_until(lock, nextFrameTime, [&session] {
+                return session.stopRequested || !session.peerConnected || !session.trackOpen;
+            });
+        }
+
+        log("Video streaming stopped");
     }
 
     void handleMessage(const std::shared_ptr<Session>& session, const std::string& text)
@@ -242,6 +416,8 @@ private:
 
     void closeSession(const std::shared_ptr<Session>& session)
     {
+        session->stopStreaming();
+
         if (session->peerConnection) {
             session->peerConnection->close();
         }
@@ -252,6 +428,7 @@ private:
         }
     }
 
+    moonlight::H264AnnexBReader videoSource_;
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;

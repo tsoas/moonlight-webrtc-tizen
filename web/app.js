@@ -1,6 +1,17 @@
 const statusElement = document.querySelector("#status");
 const logElement = document.querySelector("#log");
 const videoElement = document.querySelector("#video");
+const statistics = {
+  connection: document.querySelector("#stat-connection"),
+  ice: document.querySelector("#stat-ice"),
+  framesReceived: document.querySelector("#stat-frames-received"),
+  framesDecoded: document.querySelector("#stat-frames-decoded"),
+  framesDropped: document.querySelector("#stat-frames-dropped"),
+  packetsReceived: document.querySelector("#stat-packets-received"),
+  packetsLost: document.querySelector("#stat-packets-lost"),
+  bytesReceived: document.querySelector("#stat-bytes-received"),
+  framesPerSecond: document.querySelector("#stat-frames-per-second"),
+};
 
 const peerConnection = new RTCPeerConnection({
   iceServers: [],
@@ -18,7 +29,36 @@ function log(message) {
 function updateConnectionState() {
   const state = peerConnection.connectionState;
   statusElement.textContent = `Connection state: ${state}`;
+  statistics.connection.textContent = state;
   log(`PeerConnection state: ${state}`);
+}
+
+async function updateVideoStatistics() {
+  try {
+    const reports = await peerConnection.getStats();
+    let inboundVideo;
+
+    reports.forEach((report) => {
+      const kind = report.kind ?? report.mediaType;
+      if (report.type === "inbound-rtp" && kind === "video" && !report.isRemote) {
+        inboundVideo = report;
+      }
+    });
+
+    if (!inboundVideo) {
+      return;
+    }
+
+    statistics.framesReceived.textContent = inboundVideo.framesReceived ?? 0;
+    statistics.framesDecoded.textContent = inboundVideo.framesDecoded ?? 0;
+    statistics.framesDropped.textContent = inboundVideo.framesDropped ?? 0;
+    statistics.packetsReceived.textContent = inboundVideo.packetsReceived ?? 0;
+    statistics.packetsLost.textContent = inboundVideo.packetsLost ?? 0;
+    statistics.bytesReceived.textContent = inboundVideo.bytesReceived ?? 0;
+    statistics.framesPerSecond.textContent = inboundVideo.framesPerSecond ?? "n/a";
+  } catch (error) {
+    console.error("Unable to read WebRTC statistics", error);
+  }
 }
 
 async function addRemoteCandidate(message) {
@@ -100,10 +140,17 @@ peerConnection.addEventListener("icecandidate", (event) => {
 peerConnection.addEventListener("connectionstatechange", updateConnectionState);
 
 peerConnection.addEventListener("iceconnectionstatechange", () => {
-  log(`ICE state: ${peerConnection.iceConnectionState}`);
+  const state = peerConnection.iceConnectionState;
+  statistics.ice.textContent = state;
+  log(`ICE state: ${state}`);
 });
 
 peerConnection.addEventListener("track", (event) => {
   videoElement.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+  videoElement.play().catch((error) => {
+    log(`Video playback error: ${error.message}`);
+  });
   log("Remote video track received");
 });
+
+setInterval(updateVideoStatistics, 1000);
