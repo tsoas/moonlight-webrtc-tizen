@@ -22,8 +22,8 @@ using Json = nlohmann::json;
 
 constexpr std::uint8_t VideoPayloadType = 96;
 constexpr rtc::SSRC VideoSsrc = 42;
-constexpr double VideoFrameRate = 30.0;
-constexpr auto VideoSamplePath = "samples/test-720p30.h264";
+constexpr double VideoFrameRate = 60.0;
+constexpr auto VideoSamplePath = "samples/test-720p60.h264";
 
 struct PendingCandidate {
     std::string candidate;

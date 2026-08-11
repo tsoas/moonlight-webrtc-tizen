@@ -40,6 +40,6 @@ if(BUILD_TESTING)
     add_test(
         NAME h264_annex_b_inspect
         COMMAND h264_annex_b_inspect
-            "${CMAKE_CURRENT_SOURCE_DIR}/samples/test-720p30.h264"
+            "${CMAKE_CURRENT_SOURCE_DIR}/samples/test-720p60.h264"
     )
 endif()
