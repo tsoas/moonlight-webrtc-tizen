@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MoonlightWebRTC LANGUAGES CXX)
+project(MoonlightWebRTC LANGUAGES C CXX)
 
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+
+set(BUILD_SHARED_LIBS OFF)
+add_subdirectory(third_party/moonlight-common-c EXCLUDE_FROM_ALL)
 
 add_library(h264_annex_b_reader
     src/H264AnnexBReader.cpp
@@ -19,6 +22,22 @@ add_library(opus_file_reader
 target_compile_features(opus_file_reader PUBLIC cxx_std_20)
 target_include_directories(opus_file_reader PUBLIC src)
 
+add_library(webrtc_media_sender
+    src/webrtc/WebRtcMediaSender.cpp
+)
+
+target_compile_features(webrtc_media_sender PUBLIC cxx_std_20)
+target_include_directories(webrtc_media_sender PUBLIC src)
+target_link_libraries(webrtc_media_sender PUBLIC LibDataChannel::LibDataChannel)
+
+add_library(moonlight_media_bridge
+    src/moonlight/MoonlightMediaBridge.cpp
+)
+
+target_compile_features(moonlight_media_bridge PUBLIC cxx_std_20)
+target_include_directories(moonlight_media_bridge PUBLIC src)
+target_link_libraries(moonlight_media_bridge PUBLIC moonlight-common-c)
+
 add_executable(moonlight_webrtc
     src/main.cpp
 )
@@ -26,7 +45,9 @@ add_executable(moonlight_webrtc
 target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
     h264_annex_b_reader
+    moonlight_media_bridge
     opus_file_reader
+    webrtc_media_sender
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
 )
@@ -60,5 +81,15 @@ if(BUILD_TESTING)
         NAME opus_file_inspect
         COMMAND opus_file_inspect
             "${CMAKE_CURRENT_SOURCE_DIR}/samples/test-tone-48k-stereo.opus"
+    )
+
+    add_executable(moonlight_media_bridge_test
+        tests/MoonlightMediaBridgeTest.cpp
+    )
+    target_link_libraries(moonlight_media_bridge_test PRIVATE moonlight_media_bridge)
+
+    add_test(
+        NAME moonlight_media_bridge_test
+        COMMAND moonlight_media_bridge_test
     )
 endif()

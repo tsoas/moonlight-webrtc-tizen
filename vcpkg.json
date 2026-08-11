@@ -3,6 +3,7 @@
   "version-string": "0.1.0",
   "dependencies": [
     "nlohmann-json",
+    "openssl",
     {
       "name": "libdatachannel",
       "default-features": false,

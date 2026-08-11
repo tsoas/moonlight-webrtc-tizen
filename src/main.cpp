@@ -1,5 +1,8 @@
 #include "H264AnnexBReader.h"
 #include "OpusFileReader.h"
+#include "media/MediaSender.h"
+#include "moonlight/MoonlightMediaBridge.h"
+#include "webrtc/WebRtcMediaSender.h"
 
 #include <atomic>
 #include <chrono>
@@ -9,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -28,6 +32,8 @@ constexpr std::uint8_t AudioPayloadType = 111;
 constexpr rtc::SSRC VideoSsrc = 42;
 constexpr rtc::SSRC AudioSsrc = 43;
 constexpr double VideoFrameRate = 60.0;
+constexpr std::uint32_t VideoRtpClockRate = 90000;
+constexpr std::uint32_t AudioRtpClockRate = 48000;
 constexpr auto VideoSamplePath = "samples/test-720p60.h264";
 constexpr auto AudioSamplePath = "samples/test-tone-48k-stereo.opus";
 constexpr auto RtpCname = "moonlight-webrtc";
@@ -86,6 +92,51 @@ std::string_view videoMediaSection(std::string_view sdp)
                           : nextMediaPosition - videoPosition);
 }
 
+enum class MediaSourceMode {
+    Test,
+    Moonlight,
+};
+
+MediaSourceMode parseMediaSourceMode(int argc, char** argv)
+{
+    if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--source=test")) {
+        return MediaSourceMode::Test;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--source=moonlight") {
+        return MediaSourceMode::Moonlight;
+    }
+    throw std::invalid_argument("Usage: moonlight_webrtc [--source=test|--source=moonlight]");
+}
+
+class DiagnosticMediaSender final : public gateway::MediaSender {
+public:
+    void sendH264AccessUnit(std::span<const std::uint8_t>, std::uint32_t) override {}
+    void sendOpusPacket(std::span<const std::uint8_t>, std::uint32_t) override {}
+};
+
+int runMoonlightAdapterDiagnostic()
+{
+    DiagnosticMediaSender sender;
+    gateway::MoonlightMediaBridge bridge(sender, [](const std::string& message) {
+        std::cout << message << std::endl;
+    });
+
+    CONNECTION_LISTENER_CALLBACKS connectionCallbacks;
+    LiInitializeConnectionCallbacks(&connectionCallbacks);
+
+    STREAM_CONFIGURATION streamConfiguration;
+    LiInitializeStreamConfiguration(&streamConfiguration);
+    streamConfiguration.width = 1280;
+    streamConfiguration.height = 720;
+    streamConfiguration.fps = 60;
+    streamConfiguration.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
+    streamConfiguration.supportedVideoFormats = VIDEO_FORMAT_H264;
+
+    std::cout << "Moonlight source adapter initialized\n";
+    std::cout << "Moonlight session connection is not implemented in this milestone\n";
+    return 0;
+}
+
 struct PendingCandidate {
     std::string candidate;
     std::string mid;
@@ -118,6 +169,9 @@ struct Session {
     std::shared_ptr<rtc::PeerConnection> peerConnection;
     std::shared_ptr<rtc::Track> videoTrack;
     std::shared_ptr<rtc::Track> audioTrack;
+    std::shared_ptr<gateway::WebRtcMediaSender> mediaSender;
+    std::uint32_t videoRtpStartTimestamp = 0;
+    std::uint32_t audioRtpStartTimestamp = 0;
 
     std::mutex sendMutex;
     std::mutex candidateMutex;
@@ -317,6 +371,7 @@ private:
             RtpCname,
             VideoPayloadType,
             rtc::H264RtpPacketizer::ClockRate);
+        session->videoRtpStartTimestamp = rtpConfiguration->startTimestamp;
         auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
             rtc::NalUnit::Separator::StartSequence, rtpConfiguration);
         packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfiguration));
@@ -363,6 +418,7 @@ private:
             RtpCname,
             AudioPayloadType,
             rtc::OpusRtpPacketizer::DefaultClockRate);
+        session->audioRtpStartTimestamp = audioRtpConfiguration->startTimestamp;
         auto audioPacketizer =
             std::make_shared<rtc::OpusRtpPacketizer>(audioRtpConfiguration);
         audioPacketizer->addToChain(
@@ -386,6 +442,9 @@ private:
                 currentSession->requestStreamingStop();
             }
         });
+
+        session->mediaSender = std::make_shared<gateway::WebRtcMediaSender>(
+            session->videoTrack, session->audioTrack);
 
         session->streamingThread = std::thread([this, sessionPointer = session.get()] {
             streamMedia(*sessionPointer);
@@ -422,6 +481,7 @@ private:
         std::uint64_t audioBytesSent = 0;
         std::size_t videoFrameIndex = 0;
         std::size_t audioPacketIndex = 0;
+        std::uint64_t audioSamplesSent = 0;
         std::chrono::microseconds audioElapsed{0};
 
         while (true) {
@@ -466,10 +526,11 @@ private:
                     }
 
                     const auto& accessUnit = videoSource_.accessUnits()[videoFrameIndex];
-                    session.videoTrack->sendFrame(
-                        reinterpret_cast<const rtc::byte*>(accessUnit.data()),
-                        accessUnit.size(),
-                        videoTimestamp);
+                    const auto rtpTimestamp = session.videoRtpStartTimestamp
+                        + static_cast<std::uint32_t>(
+                            (videoFramesSent * VideoRtpClockRate)
+                            / static_cast<std::uint64_t>(VideoFrameRate));
+                    session.mediaSender->sendH264AccessUnit(accessUnit, rtpTimestamp);
 
                     ++videoFramesSent;
                     videoBytesSent += accessUnit.size();
@@ -487,14 +548,17 @@ private:
                     }
                 } else {
                     const auto& packet = audioSource_.packets()[audioPacketIndex];
-                    session.audioTrack->sendFrame(
-                        reinterpret_cast<const rtc::byte*>(packet.data()),
-                        packet.size(),
-                        audioTimestamp);
+                    const auto rtpTimestamp = session.audioRtpStartTimestamp
+                        + static_cast<std::uint32_t>(audioSamplesSent);
+                    session.mediaSender->sendOpusPacket(packet, rtpTimestamp);
 
                     ++audioPacketsSent;
                     audioBytesSent += packet.size();
-                    audioElapsed += audioSource_.packetDuration(audioPacketIndex);
+                    const auto packetDuration = audioSource_.packetDuration(audioPacketIndex);
+                    const auto packetSampleCount =
+                        audioSource_.packetSampleCounts()[audioPacketIndex];
+                    audioElapsed += packetDuration;
+                    audioSamplesSent += packetSampleCount;
                     ++audioPacketIndex;
 
                     if (audioPacketIndex == audioSource_.packets().size()) {
@@ -635,9 +699,14 @@ private:
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        const auto sourceMode = parseMediaSourceMode(argc, argv);
+        if (sourceMode == MediaSourceMode::Moonlight) {
+            return runMoonlightAdapterDiagnostic();
+        }
+
         SignalingServer server;
         server.wait();
     } catch (const std::exception& error) {
