@@ -101,6 +101,13 @@
       font-weight: 700;
     }
 
+    dd.wide-value {
+      max-width: 330px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     #log {
       height: 150px;
       margin: 0;
@@ -135,6 +142,17 @@
       <strong>GAME MODE: ENABLED</strong>
       <span>SDP video:<br>1280x720 @ 60</span>
     </div>
+
+    <h2>Gamepad input</h2>
+    <dl>
+      <div><dt>Gamepad</dt><dd id="gamepad-state">DISCONNECTED</dd></div>
+      <div><dt>Gamepad ID</dt><dd id="gamepad-id" class="wide-value">-</dd></div>
+      <div><dt>Mapping</dt><dd id="gamepad-mapping">-</dd></div>
+      <div><dt>Control channel</dt><dd id="control-channel-state">connecting</dd></div>
+      <div><dt>Input channel</dt><dd id="input-channel-state">connecting</dd></div>
+      <div><dt>Input messages/sec</dt><dd id="input-send-rate">0.0</dd></div>
+      <div><dt>Last input sequence</dt><dd id="last-input-sequence">-</dd></div>
+    </dl>
 
     <h2>Remote MediaStream</h2>
     <dl>

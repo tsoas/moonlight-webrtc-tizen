@@ -357,7 +357,26 @@ std::vector<SunshineApp> SunshineHttpClient::getAppList()
 std::string SunshineHttpClient::launchOrResume(
     const std::string& verb,
     int appId,
-    const STREAM_CONFIGURATION& streamConfiguration)
+    const STREAM_CONFIGURATION& streamConfiguration,
+    bool enableGameOptimizations)
+{
+    const std::string xml = requestHttps(
+        verb,
+        makeLaunchQuery(appId, streamConfiguration, enableGameOptimizations),
+        LaunchTimeout,
+        LiGetLaunchUrlQueryParameters());
+    verifyResponseStatus(xml);
+    const std::string sessionUrl = xmlValue(xml, "sessionUrl0");
+    if (sessionUrl.empty()) {
+        throw std::runtime_error("Sunshine launch response did not contain sessionUrl0");
+    }
+    return sessionUrl;
+}
+
+SunshineHttpClient::Query SunshineHttpClient::makeLaunchQuery(
+    int appId,
+    const STREAM_CONFIGURATION& streamConfiguration,
+    bool enableGameOptimizations)
 {
     const auto* iv = reinterpret_cast<const unsigned char*>(streamConfiguration.remoteInputAesIv);
     const std::uint32_t remoteInputKeyId = (static_cast<std::uint32_t>(iv[0]) << 24)
@@ -371,7 +390,7 @@ std::string SunshineHttpClient::launchOrResume(
              + std::to_string(streamConfiguration.height) + "x"
              + std::to_string(streamConfiguration.fps)},
         {"additionalStates", "1"},
-        {"sops", "1"},
+        {"sops", enableGameOptimizations ? "1" : "0"},
         {"rikey",
          bytesToHex(streamConfiguration.remoteInputAesKey,
                     sizeof(streamConfiguration.remoteInputAesKey))},
@@ -384,15 +403,7 @@ std::string SunshineHttpClient::launchOrResume(
         {"gcmap", "0"},
         {"gcpersist", "0"},
     };
-
-    const std::string xml = requestHttps(
-        verb, query, LaunchTimeout, LiGetLaunchUrlQueryParameters());
-    verifyResponseStatus(xml);
-    const std::string sessionUrl = xmlValue(xml, "sessionUrl0");
-    if (sessionUrl.empty()) {
-        throw std::runtime_error("Sunshine launch response did not contain sessionUrl0");
-    }
-    return sessionUrl;
+    return query;
 }
 
 SunshineServerInfo SunshineHttpClient::parseServerInfoXml(const std::string& xml)

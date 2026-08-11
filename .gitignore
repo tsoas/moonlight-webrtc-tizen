@@ -3,3 +3,6 @@ build*/
 out/
 samples/*.h264
 samples/*.opus
+tizen/.buildResult/
+tizen/Debug/
+tizen/tizen_web_project.yaml

@@ -6,6 +6,7 @@
 #include "moonlight/control/MoonlightPairing.h"
 #include "moonlight/control/MoonlightSession.h"
 #include "moonlight/control/SunshineHttpClient.h"
+#include "moonlight/input/MoonlightInputBridge.h"
 #include "webrtc/WebRtcMediaSender.h"
 
 #include <atomic>
@@ -104,6 +105,14 @@ std::string_view videoMediaSection(std::string_view sdp)
                           : nextMediaPosition - videoPosition);
 }
 
+bool hasDataChannelApplicationSection(std::string_view sdp)
+{
+    const auto application = sdp.find("m=application ");
+    return application != std::string_view::npos
+        && sdp.find("webrtc-datachannel", application) != std::string_view::npos
+        && sdp.find("a=sctp-port:", application) != std::string_view::npos;
+}
+
 enum class MediaSourceMode {
     Test,
     Moonlight,
@@ -154,6 +163,9 @@ struct PendingCandidate {
 struct Session {
     ~Session()
     {
+        if (inputBridge) {
+            inputBridge->shutdown();
+        }
         stopStreaming();
     }
 
@@ -178,8 +190,11 @@ struct Session {
     std::shared_ptr<rtc::PeerConnection> peerConnection;
     std::shared_ptr<rtc::Track> videoTrack;
     std::shared_ptr<rtc::Track> audioTrack;
+    std::shared_ptr<rtc::DataChannel> controlChannel;
+    std::shared_ptr<rtc::DataChannel> gamepadChannel;
     std::shared_ptr<gateway::WebRtcMediaSender> mediaSender;
     std::shared_ptr<gateway::moonlight::MoonlightSession> moonlightSession;
+    std::shared_ptr<gateway::moonlight::MoonlightInputBridge> inputBridge;
     std::uint32_t videoRtpStartTimestamp = 0;
     std::uint32_t audioRtpStartTimestamp = 0;
 
@@ -196,6 +211,7 @@ struct Session {
     bool stopRequested = false;
     std::atomic<bool> videoKeyframeRequested = false;
     std::atomic<std::uint64_t> keyframeRequestCount = 0;
+    std::atomic<bool> malformedGamepadMessageReported = false;
     std::thread streamingThread;
 };
 
@@ -327,6 +343,7 @@ private:
         }
 
         rtc::Configuration configuration;
+        configuration.disableAutoNegotiation = true;
         auto peerConnection = std::make_shared<rtc::PeerConnection>(configuration);
         session->peerConnection = peerConnection;
 
@@ -347,6 +364,9 @@ private:
                         if (state == rtc::PeerConnection::State::Disconnected
                             || state == rtc::PeerConnection::State::Failed
                             || state == rtc::PeerConnection::State::Closed) {
+                            if (currentSession->inputBridge) {
+                                currentSession->inputBridge->onTransportClosed();
+                            }
                             currentSession->stopRequested = true;
                         }
                     }
@@ -374,8 +394,15 @@ private:
                         currentSession->socket->close();
                         return;
                     }
+                    if (!hasDataChannelApplicationSection(sdp)) {
+                        log("WebRTC data-channel SDP validation failed");
+                        currentSession->requestStreamingStop();
+                        currentSession->socket->close();
+                        return;
+                    }
 
                     log("Samsung Game Mode SDP imageattr enabled");
+                    log("WebRTC data-channel application section enabled");
                     log("Outgoing SDP m=video section:\n"
                         + std::string(videoMediaSection(sdp)));
                     sendJson(currentSession,
@@ -392,6 +419,76 @@ private:
                           {"candidate", candidateText},
                           {"mid", candidate.mid()}});
                 log("Sent ICE candidate: " + candidateText);
+            }
+        });
+
+        session->inputBridge =
+            std::make_shared<gateway::moonlight::MoonlightInputBridge>(
+                [this](const std::string& message) { log(message); });
+
+        rtc::DataChannelInit controlChannelOptions;
+        controlChannelOptions.reliability.unordered = false;
+        session->controlChannel =
+            peerConnection->createDataChannel("control", controlChannelOptions);
+        log("Control DataChannel configured: ordered, reliable");
+
+        session->controlChannel->onOpen([this] {
+            log("Control DataChannel opened");
+        });
+        session->controlChannel->onClosed([this, weakSession] {
+            log("Control DataChannel closed");
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->inputBridge->onTransportClosed();
+            }
+        });
+        session->controlChannel->onError([this, weakSession](const std::string& error) {
+            log("Control DataChannel error: " + error);
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->inputBridge->onTransportClosed();
+            }
+        });
+        session->controlChannel->onMessage([this, weakSession](rtc::message_variant data) {
+            const auto currentSession = weakSession.lock();
+            if (!currentSession || !std::holds_alternative<std::string>(data)) {
+                return;
+            }
+            if (!currentSession->inputBridge->handleControlMessage(
+                    std::get<std::string>(std::move(data)))) {
+                log("Rejected malformed gamepad control message");
+            }
+        });
+
+        rtc::DataChannelInit gamepadChannelOptions;
+        gamepadChannelOptions.reliability.unordered = true;
+        gamepadChannelOptions.reliability.maxRetransmits = 0;
+        session->gamepadChannel =
+            peerConnection->createDataChannel("gamepad", gamepadChannelOptions);
+        log("Gamepad DataChannel configured: unordered, maxRetransmits=0");
+
+        session->gamepadChannel->onOpen([this] {
+            log("Gamepad DataChannel opened");
+        });
+        session->gamepadChannel->onClosed([this, weakSession] {
+            log("Gamepad DataChannel closed");
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->inputBridge->onTransportClosed();
+            }
+        });
+        session->gamepadChannel->onError([this, weakSession](const std::string& error) {
+            log("Gamepad DataChannel error: " + error);
+            if (const auto currentSession = weakSession.lock()) {
+                currentSession->inputBridge->onTransportClosed();
+            }
+        });
+        session->gamepadChannel->onMessage([this, weakSession](rtc::message_variant data) {
+            const auto currentSession = weakSession.lock();
+            if (!currentSession || !std::holds_alternative<std::string>(data)) {
+                return;
+            }
+            if (!currentSession->inputBridge->handleGamepadMessage(
+                    std::get<std::string>(std::move(data)))
+                && !currentSession->malformedGamepadMessageReported.exchange(true)) {
+                log("Rejected malformed or stale gamepad state message");
             }
         });
 
@@ -535,6 +632,7 @@ private:
 
         try {
             moonlightSession->start();
+            session.inputBridge->setMoonlightSessionActive(true);
             std::unique_lock lock(session.streamMutex);
             session.streamCondition.wait(lock, [&session] { return session.stopRequested; });
         } catch (const std::exception& error) {
@@ -542,6 +640,7 @@ private:
             session.requestStreamingStop();
         }
 
+        session.inputBridge->setMoonlightSessionActive(false);
         moonlightSession->stop();
         {
             const std::lock_guard lock(session.streamMutex);
@@ -762,6 +861,9 @@ private:
 
     void closeSession(const std::shared_ptr<Session>& session)
     {
+        if (session->inputBridge) {
+            session->inputBridge->onTransportClosed();
+        }
         session->stopStreaming();
 
         if (session->peerConnection) {

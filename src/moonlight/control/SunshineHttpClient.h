@@ -51,7 +51,12 @@ public:
     std::vector<SunshineApp> getAppList();
     std::string launchOrResume(const std::string& verb,
                                int appId,
-                               const STREAM_CONFIGURATION& streamConfiguration);
+                               const STREAM_CONFIGURATION& streamConfiguration,
+                               bool enableGameOptimizations);
+
+    static Query makeLaunchQuery(int appId,
+                                 const STREAM_CONFIGURATION& streamConfiguration,
+                                 bool enableGameOptimizations);
 
     static SunshineServerInfo parseServerInfoXml(const std::string& xml);
     static std::vector<SunshineApp> parseAppListXml(const std::string& xml);

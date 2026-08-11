@@ -70,6 +70,10 @@ public:
                                            const Logger& logger);
     static STREAM_CONFIGURATION createStreamConfiguration();
 
+    // Sunshine uses SOPS as permission to change the host display mode. Stream
+    // dimensions select encoder output only and must never alter Windows display state.
+    static constexpr bool HostGameOptimizationsEnabled = false;
+
     void start();
     void stop();
     void onWebRtcKeyframeRequest();

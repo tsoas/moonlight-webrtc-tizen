@@ -257,8 +257,12 @@ void MoonlightSession::start()
         }
 
         streamConfiguration_ = createStreamConfiguration();
+        log("Host game optimizations: DISABLED");
         const std::string rtspSessionUrl = httpClient->launchOrResume(
-            verb, application->id, streamConfiguration_);
+            verb,
+            application->id,
+            streamConfiguration_,
+            HostGameOptimizationsEnabled);
         log(verb == "resume" ? "Sunshine Desktop resumed" : "Sunshine Desktop launched");
         log("RTSP session URL obtained");
 

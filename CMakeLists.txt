@@ -41,6 +41,17 @@ target_compile_features(moonlight_media_bridge PUBLIC cxx_std_20)
 target_include_directories(moonlight_media_bridge PUBLIC src)
 target_link_libraries(moonlight_media_bridge PUBLIC moonlight-common-c)
 
+add_library(moonlight_input_bridge
+    src/moonlight/input/MoonlightInputBridge.cpp
+)
+
+target_compile_features(moonlight_input_bridge PUBLIC cxx_std_20)
+target_include_directories(moonlight_input_bridge PUBLIC src)
+target_link_libraries(moonlight_input_bridge PUBLIC
+    moonlight-common-c
+    nlohmann_json::nlohmann_json
+)
+
 add_library(moonlight_control
     src/moonlight/control/MoonlightIdentity.cpp
     src/moonlight/control/MoonlightPairing.cpp
@@ -69,6 +80,7 @@ target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
     h264_annex_b_reader
     moonlight_control
+    moonlight_input_bridge
     moonlight_media_bridge
     opus_file_reader
     webrtc_media_sender
@@ -125,5 +137,15 @@ if(BUILD_TESTING)
     add_test(
         NAME moonlight_control_test
         COMMAND moonlight_control_test
+    )
+
+    add_executable(moonlight_input_bridge_test
+        tests/MoonlightInputBridgeTest.cpp
+    )
+    target_link_libraries(moonlight_input_bridge_test PRIVATE moonlight_input_bridge)
+
+    add_test(
+        NAME moonlight_input_bridge_test
+        COMMAND moonlight_input_bridge_test
     )
 endif()

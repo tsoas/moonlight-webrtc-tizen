@@ -3,6 +3,7 @@
 #include "moonlight/control/MoonlightSession.h"
 #include "moonlight/control/SunshineHttpClient.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -83,6 +84,18 @@ int main()
                     && streamConfiguration.colorSpace == COLORSPACE_REC_709
                     && streamConfiguration.colorRange == COLOR_RANGE_LIMITED,
                 "STREAM_CONFIGURATION values are incorrect");
+
+        const auto launchQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
+            7,
+            streamConfiguration,
+            gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled);
+        const auto sops = std::find_if(
+            launchQuery.begin(), launchQuery.end(), [](const auto& item) {
+                return item.first == "sops";
+            });
+        require(!gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled
+                    && sops != launchQuery.end() && sops->second == "0",
+                "Sunshine host game optimizations were not explicitly disabled");
 
         gateway::moonlight::ServerInformationStorage serverStorage(
             serverInfo, "127.0.0.1", "rtsp://session-url");
