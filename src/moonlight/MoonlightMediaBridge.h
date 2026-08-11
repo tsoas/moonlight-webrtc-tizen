@@ -84,6 +84,7 @@ private:
     std::atomic<bool> audioConfigured_ = false;
     std::atomic<bool> audioStarted_ = false;
     std::atomic<bool> moonlightIdrRequested_ = false;
+    std::atomic<bool> waitingForMoonlightIdr_ = false;
     std::atomic<int> audioSamplesPerFrame_ = 0;
     std::atomic<std::uint32_t> audioRtpTimestamp_ = 0;
     std::atomic<std::uint64_t> videoFrames_ = 0;

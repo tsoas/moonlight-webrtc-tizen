@@ -214,6 +214,11 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
 
     sender_.sendH264AccessUnit(*flattened, decodeUnit->rtpTimestamp);
 
+    if (decodeUnit->frameType == FRAME_TYPE_IDR
+        && waitingForMoonlightIdr_.exchange(false, std::memory_order_acq_rel)) {
+        log("Moonlight IDR frame observed after keyframe request");
+    }
+
     const auto frames = videoFrames_.fetch_add(1, std::memory_order_relaxed) + 1;
     const auto bytes = videoBytes_.fetch_add(flattened->size(), std::memory_order_relaxed)
         + flattened->size();
@@ -244,6 +249,7 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
     }
 
     if (moonlightIdrRequested_.exchange(false, std::memory_order_acq_rel)) {
+        waitingForMoonlightIdr_.store(true, std::memory_order_release);
         log("WebRTC keyframe request forwarded to Moonlight");
         return DR_NEED_IDR;
     }

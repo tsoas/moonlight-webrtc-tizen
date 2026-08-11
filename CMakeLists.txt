@@ -2,8 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 
 project(MoonlightWebRTC LANGUAGES C CXX)
 
+find_package(CURL CONFIG REQUIRED)
 find_package(LibDataChannel CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(pugixml CONFIG REQUIRED)
 
 set(BUILD_SHARED_LIBS OFF)
 add_subdirectory(third_party/moonlight-common-c EXCLUDE_FROM_ALL)
@@ -38,6 +41,26 @@ target_compile_features(moonlight_media_bridge PUBLIC cxx_std_20)
 target_include_directories(moonlight_media_bridge PUBLIC src)
 target_link_libraries(moonlight_media_bridge PUBLIC moonlight-common-c)
 
+add_library(moonlight_control
+    src/moonlight/control/MoonlightIdentity.cpp
+    src/moonlight/control/MoonlightPairing.cpp
+    src/moonlight/control/MoonlightSession.cpp
+    src/moonlight/control/SunshineHttpClient.cpp
+)
+
+target_compile_features(moonlight_control PUBLIC cxx_std_20)
+target_include_directories(moonlight_control PUBLIC src)
+target_link_libraries(moonlight_control PUBLIC
+    moonlight-common-c
+    moonlight_media_bridge
+    CURL::libcurl
+    nlohmann_json::nlohmann_json
+    OpenSSL::Crypto
+    OpenSSL::SSL
+    pugixml::pugixml
+    ws2_32
+)
+
 add_executable(moonlight_webrtc
     src/main.cpp
 )
@@ -45,6 +68,7 @@ add_executable(moonlight_webrtc
 target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
     h264_annex_b_reader
+    moonlight_control
     moonlight_media_bridge
     opus_file_reader
     webrtc_media_sender
@@ -91,5 +115,15 @@ if(BUILD_TESTING)
     add_test(
         NAME moonlight_media_bridge_test
         COMMAND moonlight_media_bridge_test
+    )
+
+    add_executable(moonlight_control_test
+        tests/MoonlightControlTest.cpp
+    )
+    target_link_libraries(moonlight_control_test PRIVATE moonlight_control)
+
+    add_test(
+        NAME moonlight_control_test
+        COMMAND moonlight_control_test
     )
 endif()

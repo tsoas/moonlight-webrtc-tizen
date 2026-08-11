@@ -2,15 +2,21 @@
 #include "OpusFileReader.h"
 #include "media/MediaSender.h"
 #include "moonlight/MoonlightMediaBridge.h"
+#include "moonlight/control/MoonlightIdentity.h"
+#include "moonlight/control/MoonlightPairing.h"
+#include "moonlight/control/MoonlightSession.h"
+#include "moonlight/control/SunshineHttpClient.h"
 #include "webrtc/WebRtcMediaSender.h"
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -42,6 +48,12 @@ constexpr std::string_view SamsungGameModeImageAttribute =
     "imageattr:96 send [x=[1280:1280],y=[720:720],fps=[60:60]]";
 constexpr std::string_view SamsungGameModeSdpLine =
     "a=imageattr:96 send [x=[1280:1280],y=[720:720],fps=[60:60]]";
+volatile std::sig_atomic_t ShutdownRequested = 0;
+
+void requestShutdown(int)
+{
+    ShutdownRequested = 1;
+}
 
 bool hasValidSamsungGameModeImageAttribute(std::string_view sdp)
 {
@@ -97,44 +109,41 @@ enum class MediaSourceMode {
     Moonlight,
 };
 
-MediaSourceMode parseMediaSourceMode(int argc, char** argv)
-{
-    if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--source=test")) {
-        return MediaSourceMode::Test;
-    }
-    if (argc == 2 && std::string_view(argv[1]) == "--source=moonlight") {
-        return MediaSourceMode::Moonlight;
-    }
-    throw std::invalid_argument("Usage: moonlight_webrtc [--source=test|--source=moonlight]");
-}
-
-class DiagnosticMediaSender final : public gateway::MediaSender {
-public:
-    void sendH264AccessUnit(std::span<const std::uint8_t>, std::uint32_t) override {}
-    void sendOpusPacket(std::span<const std::uint8_t>, std::uint32_t) override {}
+struct ProgramOptions {
+    MediaSourceMode sourceMode = MediaSourceMode::Test;
+    std::optional<std::string> host;
+    std::string application = "Desktop";
+    bool pair = false;
 };
 
-int runMoonlightAdapterDiagnostic()
+ProgramOptions parseProgramOptions(int argc, char** argv)
 {
-    DiagnosticMediaSender sender;
-    gateway::MoonlightMediaBridge bridge(sender, [](const std::string& message) {
-        std::cout << message << std::endl;
-    });
+    ProgramOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "--source=test") {
+            options.sourceMode = MediaSourceMode::Test;
+        } else if (argument == "--source=moonlight") {
+            options.sourceMode = MediaSourceMode::Moonlight;
+        } else if (argument.starts_with("--host=") && argument.size() > 7) {
+            options.host = std::string(argument.substr(7));
+        } else if (argument.starts_with("--app=") && argument.size() > 6) {
+            options.application = std::string(argument.substr(6));
+        } else if (argument == "--pair") {
+            options.pair = true;
+        } else {
+            throw std::invalid_argument(
+                "Usage: moonlight_webrtc [--source=test|--source=moonlight] "
+                "[--host=<host>] [--app=<name>] [--pair]");
+        }
+    }
 
-    CONNECTION_LISTENER_CALLBACKS connectionCallbacks;
-    LiInitializeConnectionCallbacks(&connectionCallbacks);
-
-    STREAM_CONFIGURATION streamConfiguration;
-    LiInitializeStreamConfiguration(&streamConfiguration);
-    streamConfiguration.width = 1280;
-    streamConfiguration.height = 720;
-    streamConfiguration.fps = 60;
-    streamConfiguration.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    streamConfiguration.supportedVideoFormats = VIDEO_FORMAT_H264;
-
-    std::cout << "Moonlight source adapter initialized\n";
-    std::cout << "Moonlight session connection is not implemented in this milestone\n";
-    return 0;
+    if (options.sourceMode != MediaSourceMode::Moonlight
+        && (options.host || options.application != "Desktop" || options.pair)) {
+        throw std::invalid_argument(
+            "--host, --app, and --pair require --source=moonlight");
+    }
+    return options;
 }
 
 struct PendingCandidate {
@@ -170,6 +179,7 @@ struct Session {
     std::shared_ptr<rtc::Track> videoTrack;
     std::shared_ptr<rtc::Track> audioTrack;
     std::shared_ptr<gateway::WebRtcMediaSender> mediaSender;
+    std::shared_ptr<gateway::moonlight::MoonlightSession> moonlightSession;
     std::uint32_t videoRtpStartTimestamp = 0;
     std::uint32_t audioRtpStartTimestamp = 0;
 
@@ -191,34 +201,60 @@ struct Session {
 
 class SignalingServer {
 public:
-    SignalingServer()
-        : videoSource_(VideoSamplePath)
-        , audioSource_(AudioSamplePath)
+    explicit SignalingServer(const ProgramOptions& options)
+        : sourceMode_(options.sourceMode)
+        , moonlightOptions_{options.host, options.application}
+        , identity_(sourceMode_ == MediaSourceMode::Moonlight
+                        ? std::make_unique<gateway::moonlight::MoonlightIdentity>()
+                        : nullptr)
         , server_(makeServerConfiguration())
     {
         server_.onClient([this](std::shared_ptr<rtc::WebSocket> socket) {
             acceptClient(std::move(socket));
         });
 
-        {
+        if (sourceMode_ == MediaSourceMode::Test) {
+            videoSource_ = std::make_unique<moonlight::H264AnnexBReader>(VideoSamplePath);
+            audioSource_ = std::make_unique<moonlight::OpusFileReader>(AudioSamplePath);
+
             std::ostringstream message;
-            message << "Loaded H.264 sample: " << videoSource_.accessUnits().size()
+            message << "Loaded H.264 sample: " << videoSource_->accessUnits().size()
                     << " access units";
             log(message.str());
-        }
-        {
-            std::ostringstream message;
-            message << "Loaded Opus sample: " << audioSource_.packets().size()
+            message.str("");
+            message.clear();
+            message << "Loaded Opus sample: " << audioSource_->packets().size()
                     << " encoded packets";
             log(message.str());
+        } else {
+            log("Moonlight source selected");
+            log("Moonlight identity path: " + identity_->storageDirectory().string());
         }
         log("WebSocket signaling server listening on 0.0.0.0:8000");
+    }
+
+    ~SignalingServer()
+    {
+        std::shared_ptr<Session> session;
+        {
+            const std::lock_guard lock(sessionMutex_);
+            session = std::exchange(activeSession_, nullptr);
+        }
+        if (session) {
+            session->requestStreamingStop();
+            session->stopStreaming();
+            if (session->peerConnection) {
+                session->peerConnection->close();
+            }
+        }
     }
 
     void wait()
     {
         std::unique_lock lock(waitMutex_);
-        waitCondition_.wait(lock);
+        while (!ShutdownRequested) {
+            waitCondition_.wait_for(lock, std::chrono::milliseconds(200));
+        }
     }
 
 private:
@@ -378,12 +414,25 @@ private:
         packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
         packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, weakSession] {
             if (const auto currentSession = weakSession.lock()) {
-                currentSession->videoKeyframeRequested.store(true, std::memory_order_relaxed);
                 const auto requestNumber = currentSession->keyframeRequestCount.fetch_add(
                                                1, std::memory_order_relaxed)
                     + 1;
                 log("RTCP PLI/FIR received: H.264 IDR requested (#"
                     + std::to_string(requestNumber) + ")");
+
+                if (sourceMode_ == MediaSourceMode::Moonlight) {
+                    std::shared_ptr<gateway::moonlight::MoonlightSession> moonlightSession;
+                    {
+                        const std::lock_guard lock(currentSession->streamMutex);
+                        moonlightSession = currentSession->moonlightSession;
+                    }
+                    if (moonlightSession) {
+                        moonlightSession->onWebRtcKeyframeRequest();
+                    }
+                } else {
+                    currentSession->videoKeyframeRequested.store(
+                        true, std::memory_order_relaxed);
+                }
             }
         }));
         session->videoTrack->setMediaHandler(packetizer);
@@ -447,25 +496,64 @@ private:
             session->videoTrack, session->audioTrack);
 
         session->streamingThread = std::thread([this, sessionPointer = session.get()] {
-            streamMedia(*sessionPointer);
+            if (sourceMode_ == MediaSourceMode::Moonlight) {
+                streamMoonlightMedia(*sessionPointer);
+            } else {
+                streamTestMedia(*sessionPointer);
+            }
         });
 
         peerConnection->setLocalDescription();
     }
 
-    void streamMedia(Session& session)
+    bool waitForMediaTracks(Session& session)
     {
-        {
-            std::unique_lock lock(session.streamMutex);
-            session.streamCondition.wait(lock, [&session] {
-                return session.stopRequested
-                    || (session.peerConnected && session.videoTrackOpen
-                        && session.audioTrackOpen);
-            });
+        std::unique_lock lock(session.streamMutex);
+        session.streamCondition.wait(lock, [&session] {
+            return session.stopRequested
+                || (session.peerConnected && session.videoTrackOpen && session.audioTrackOpen);
+        });
+        return !session.stopRequested;
+    }
 
-            if (session.stopRequested) {
-                return;
-            }
+    void streamMoonlightMedia(Session& session)
+    {
+        if (!waitForMediaTracks(session)) {
+            return;
+        }
+
+        auto moonlightSession = std::make_shared<gateway::moonlight::MoonlightSession>(
+            *session.mediaSender,
+            *identity_,
+            moonlightOptions_,
+            [this](const std::string& message) { log(message); },
+            [&session] { session.requestStreamingStop(); });
+        {
+            const std::lock_guard lock(session.streamMutex);
+            session.moonlightSession = moonlightSession;
+        }
+
+        try {
+            moonlightSession->start();
+            std::unique_lock lock(session.streamMutex);
+            session.streamCondition.wait(lock, [&session] { return session.stopRequested; });
+        } catch (const std::exception& error) {
+            log("Moonlight streaming error: " + std::string(error.what()));
+            session.requestStreamingStop();
+        }
+
+        moonlightSession->stop();
+        {
+            const std::lock_guard lock(session.streamMutex);
+            session.moonlightSession.reset();
+        }
+        log("Moonlight streaming stopped");
+    }
+
+    void streamTestMedia(Session& session)
+    {
+        if (!waitForMediaTracks(session)) {
+            return;
         }
 
         log("Video streaming started");
@@ -518,14 +606,14 @@ private:
                         false, std::memory_order_relaxed);
                     bool idrScheduled = false;
                     if (keyframeRequested) {
-                        const auto idrIndex = videoSource_.firstIdrAccessUnitIndex();
+                        const auto idrIndex = videoSource_->firstIdrAccessUnitIndex();
                         if (idrIndex) {
                             videoFrameIndex = *idrIndex;
                             idrScheduled = true;
                         }
                     }
 
-                    const auto& accessUnit = videoSource_.accessUnits()[videoFrameIndex];
+                    const auto& accessUnit = videoSource_->accessUnits()[videoFrameIndex];
                     const auto rtpTimestamp = session.videoRtpStartTimestamp
                         + static_cast<std::uint32_t>(
                             (videoFramesSent * VideoRtpClockRate)
@@ -542,26 +630,26 @@ private:
                         log("RTCP PLI/FIR response unavailable: sample has no H.264 IDR");
                     }
 
-                    if (videoFrameIndex == videoSource_.accessUnits().size()) {
+                    if (videoFrameIndex == videoSource_->accessUnits().size()) {
                         videoFrameIndex = 0;
                         log("Video loop restarted");
                     }
                 } else {
-                    const auto& packet = audioSource_.packets()[audioPacketIndex];
+                    const auto& packet = audioSource_->packets()[audioPacketIndex];
                     const auto rtpTimestamp = session.audioRtpStartTimestamp
                         + static_cast<std::uint32_t>(audioSamplesSent);
                     session.mediaSender->sendOpusPacket(packet, rtpTimestamp);
 
                     ++audioPacketsSent;
                     audioBytesSent += packet.size();
-                    const auto packetDuration = audioSource_.packetDuration(audioPacketIndex);
+                    const auto packetDuration = audioSource_->packetDuration(audioPacketIndex);
                     const auto packetSampleCount =
-                        audioSource_.packetSampleCounts()[audioPacketIndex];
+                        audioSource_->packetSampleCounts()[audioPacketIndex];
                     audioElapsed += packetDuration;
                     audioSamplesSent += packetSampleCount;
                     ++audioPacketIndex;
 
-                    if (audioPacketIndex == audioSource_.packets().size()) {
+                    if (audioPacketIndex == audioSource_->packets().size()) {
                         audioPacketIndex = 0;
                         log("Audio loop restarted");
                     }
@@ -686,8 +774,11 @@ private:
         }
     }
 
-    moonlight::H264AnnexBReader videoSource_;
-    moonlight::OpusFileReader audioSource_;
+    MediaSourceMode sourceMode_;
+    gateway::moonlight::MoonlightSessionOptions moonlightOptions_;
+    std::unique_ptr<gateway::moonlight::MoonlightIdentity> identity_;
+    std::unique_ptr<moonlight::H264AnnexBReader> videoSource_;
+    std::unique_ptr<moonlight::OpusFileReader> audioSource_;
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;
@@ -697,17 +788,98 @@ private:
     std::condition_variable waitCondition_;
 };
 
+int runMoonlightPairing(const ProgramOptions& options)
+{
+    gateway::moonlight::MoonlightIdentity identity;
+    const auto logger = [](const std::string& message) {
+        std::cout << message << std::endl;
+    };
+    logger("Moonlight identity path: " + identity.storageDirectory().string());
+
+    auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+        identity, options.host, logger);
+    auto httpClient = std::make_unique<gateway::moonlight::SunshineHttpClient>(
+        identity, detected.address);
+    httpClient->setHttpsPort(detected.serverInfo.httpsPort);
+    if (detected.pairedHost) {
+        httpClient->setPinnedServerCertificate(
+            detected.pairedHost->serverCertificatePem);
+    }
+
+    if (detected.pairedHost && detected.serverInfo.pairStatus == 1) {
+        logger("Moonlight client already paired");
+    } else {
+        const std::string pin = gateway::moonlight::MoonlightPairing::generatePin();
+        std::cout << "====================================\n"
+                  << "MOONLIGHT PAIRING PIN: " << pin << '\n'
+                  << "Enter this PIN in Sunshine.\n"
+                  << "====================================" << std::endl;
+
+        gateway::moonlight::MoonlightPairing pairing(identity, *httpClient);
+        const auto outcome = pairing.pair(detected.serverInfo.appVersion, pin);
+        if (outcome.result
+            == gateway::moonlight::MoonlightPairing::Result::IncorrectPin) {
+            throw std::runtime_error("Sunshine rejected the Moonlight pairing PIN");
+        }
+        if (outcome.result
+            == gateway::moonlight::MoonlightPairing::Result::AlreadyInProgress) {
+            throw std::runtime_error("Sunshine is already handling another pairing request");
+        }
+        if (outcome.result != gateway::moonlight::MoonlightPairing::Result::Paired) {
+            throw std::runtime_error("Sunshine pairing failed");
+        }
+
+        gateway::moonlight::PairedSunshineHost host{
+            detected.serverInfo.uniqueId,
+            detected.serverInfo.hostname,
+            detected.address,
+            detected.serverInfo.httpsPort,
+            outcome.serverCertificatePem,
+        };
+        identity.savePairedHost(host);
+        detected.pairedHost = host;
+        httpClient->setPinnedServerCertificate(outcome.serverCertificatePem);
+
+        const auto pairedServerInfo = httpClient->getServerInfo(true, std::chrono::seconds(5));
+        if (pairedServerInfo.pairStatus != 1) {
+            throw std::runtime_error(
+                "Sunshine pairing completed but /serverinfo does not report paired");
+        }
+        detected.serverInfo = pairedServerInfo;
+        logger("Moonlight pairing completed");
+        logger("Sunshine certificate pinned");
+    }
+
+    auto applications = httpClient->getAppList();
+    for (const auto& application : applications) {
+        logger("Sunshine application: " + application.title + " (ID "
+               + std::to_string(application.id) + ")");
+    }
+    const auto* selectedApplication =
+        gateway::moonlight::SunshineHttpClient::findApplication(
+            applications, options.application);
+    if (!selectedApplication) {
+        throw std::runtime_error(
+            "Requested Sunshine application was not found: " + options.application);
+    }
+    logger("Selected Sunshine application: " + selectedApplication->title + " (ID "
+           + std::to_string(selectedApplication->id) + ")");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     try {
-        const auto sourceMode = parseMediaSourceMode(argc, argv);
-        if (sourceMode == MediaSourceMode::Moonlight) {
-            return runMoonlightAdapterDiagnostic();
+        const auto options = parseProgramOptions(argc, argv);
+        if (options.pair) {
+            return runMoonlightPairing(options);
         }
 
-        SignalingServer server;
+        std::signal(SIGINT, requestShutdown);
+        std::signal(SIGTERM, requestShutdown);
+        SignalingServer server(options);
         server.wait();
     } catch (const std::exception& error) {
         std::cerr << "Fatal error: " << error.what() << '\n';

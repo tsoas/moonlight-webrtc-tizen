@@ -117,6 +117,8 @@ int main()
         const auto pframeDiagnostics = bridge.lastVideoFrame();
         require(pframeDiagnostics && pframeDiagnostics->frameType == FRAME_TYPE_PFRAME,
                 "P-frame diagnostics were not preserved");
+        require(videoCallbacks->submitDecodeUnit(&idrUnit) == DR_OK,
+                "Moonlight IDR after keyframe request was not accepted");
 
         auto* audioCallbacks = bridge.audioCallbacks();
         OPUS_MULTISTREAM_CONFIGURATION unsupportedAudio{};
@@ -152,10 +154,14 @@ int main()
                 "samplesPerFrame did not drive the Opus RTP timeline");
 
         bool keyframeLogFound = false;
+        bool idrObservedLogFound = false;
         for (const auto& message : logs) {
             keyframeLogFound |= message == "WebRTC keyframe request forwarded to Moonlight";
+            idrObservedLogFound |=
+                message == "Moonlight IDR frame observed after keyframe request";
         }
         require(keyframeLogFound, "Keyframe forwarding diagnostic was not logged");
+        require(idrObservedLogFound, "Moonlight IDR observation was not logged");
 
         audioCallbacks->stop();
         audioCallbacks->cleanup();

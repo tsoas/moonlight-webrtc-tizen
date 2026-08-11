@@ -2,8 +2,16 @@
   "name": "moonlight-webrtc",
   "version-string": "0.1.0",
   "dependencies": [
+    {
+      "name": "curl",
+      "default-features": false,
+      "features": [
+        "openssl"
+      ]
+    },
     "nlohmann-json",
     "openssl",
+    "pugixml",
     {
       "name": "libdatachannel",
       "default-features": false,
