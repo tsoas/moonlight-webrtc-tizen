@@ -2,6 +2,7 @@
   "name": "moonlight-webrtc",
   "version-string": "0.1.0",
   "dependencies": [
+    "nlohmann-json",
     {
       "name": "libdatachannel",
       "default-features": false,
