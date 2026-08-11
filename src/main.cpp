@@ -86,7 +86,7 @@ public:
                     << " access units";
             log(message.str());
         }
-        log("WebSocket signaling server listening on ws://127.0.0.1:8000");
+        log("WebSocket signaling server listening on 0.0.0.0:8000");
     }
 
     void wait()
@@ -101,7 +101,7 @@ private:
         rtc::WebSocketServer::Configuration configuration;
         configuration.port = 8000;
         configuration.enableTls = false;
-        configuration.bindAddress = "127.0.0.1";
+        configuration.bindAddress = "0.0.0.0";
         return configuration;
     }
 
