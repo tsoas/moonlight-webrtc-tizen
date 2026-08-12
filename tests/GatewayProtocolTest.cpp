@@ -65,6 +65,8 @@ int main()
         const auto settings4k = gateway::defaultStreamSettings(3840, 2160);
         auto settingsHdr1080 = settingsHevc1080;
         settingsHdr1080.hdr = true;
+        auto settingsHdr1440 = settings1440;
+        settingsHdr1440.hdr = true;
         auto settingsHdr4k = settings4k;
         settingsHdr4k.hdr = true;
         require(!gateway::validateStreamSettings(settings720)
@@ -84,8 +86,9 @@ int main()
                     && settings4k.bitrateKbps == 50000,
                 "Valid/default HEVC 4K60 settings are incorrect");
         require(!gateway::validateStreamSettings(settingsHdr1080)
+                    && !gateway::validateStreamSettings(settingsHdr1440)
                     && !gateway::validateStreamSettings(settingsHdr4k),
-                "Valid 1080p/4K HEVC HDR settings were rejected");
+                "Valid 1080p/1440p/4K HEVC HDR settings were rejected");
 
         auto invalid = settings720;
         invalid.width = 1366;
@@ -100,9 +103,10 @@ int main()
         require(gateway::validateStreamSettings(invalid).has_value(),
                 "HDR streaming was accepted");
         invalid = settings1440;
+        invalid.codec = gateway::VideoCodec::H264;
         invalid.hdr = true;
         require(gateway::validateStreamSettings(invalid).has_value(),
-                "Experimental 1440p HDR was accepted");
+                "H.264 1440p HDR was accepted");
         invalid = settingsHevc1080;
         invalid.codec = gateway::VideoCodec::H264;
         invalid.hdr = true;
@@ -159,6 +163,12 @@ int main()
                     parsedHdr1080.payload).settings
                     == settingsHdr1080,
                 "HEVC HDR 1080p start-session parsing failed");
+        const auto parsedHdr1440 = gateway::protocol::parseClientMessage(
+            startMessage(2560, 1440, 60, "hevc", 30000, true, 2));
+        require(std::get<gateway::protocol::StartSessionRequest>(
+                    parsedHdr1440.payload).settings
+                    == settingsHdr1440,
+                "HEVC HDR 1440p start-session parsing failed");
         const auto parsedHdr4k = gateway::protocol::parseClientMessage(
             startMessage(3840, 2160, 60, "hevc", 50000, true, 2));
         require(std::get<gateway::protocol::StartSessionRequest>(
@@ -175,7 +185,7 @@ int main()
         requireProtocolError(
             [] {
                 gateway::protocol::parseClientMessage(
-                    startMessage(2560, 1440, 60, "hevc", 30000, true, 2));
+                    startMessage(2560, 1440, 60, "h264", 30000, true, 2));
             },
             "unsupported-settings");
         requireProtocolError(
@@ -249,6 +259,9 @@ int main()
         require(imageAttribute1440
                     == "imageattr:96 send [x=[2560:2560],y=[1440:1440],fps=[60:60]]",
                 "1440p imageattr generation failed");
+        require(gateway::samsungGameModeImageAttribute(settingsHdr1440)
+                    == "imageattr:96 send [x=[2560:2560],y=[1440:1440],fps=[60:60]]",
+                "1440p HDR imageattr generation failed");
         require(imageAttribute4k
                     == "imageattr:96 send [x=[3840:3840],y=[2160:2160],fps=[60:60]]",
                 "4K imageattr generation failed");
@@ -267,6 +280,9 @@ int main()
                 "1080p imageattr validation failed");
         require(gateway::hasValidSamsungGameModeImageAttribute(sdp1440, settings1440),
                 "1440p imageattr validation failed");
+        require(gateway::hasValidSamsungGameModeImageAttribute(
+                    sdp1440, settingsHdr1440),
+                "1440p HDR imageattr validation failed");
         require(gateway::hasValidSamsungGameModeImageAttribute(sdp4k, settings4k),
                 "4K imageattr validation failed");
         require(!gateway::hasValidSamsungGameModeImageAttribute(sdp720, settings1080),
@@ -293,6 +309,8 @@ int main()
         require(gateway::hevcFormatParameters(settingsHevc1080) == std::nullopt
                     && gateway::hevcFormatParameters(settingsHdr1080)
                         == "profile-id=2;tier-flag=0;level-id=123"
+                    && gateway::hevcFormatParameters(settingsHdr1440)
+                        == "profile-id=2;tier-flag=0;level-id=150"
                     && gateway::hevcFormatParameters(settingsHdr4k)
                         == "profile-id=2;tier-flag=0;level-id=153",
                 "HEVC Main10 SDP format parameters are incorrect");
@@ -306,6 +324,11 @@ int main()
             "a=rtpmap:96 H265/90000\r\n"
             "a=fmtp:96 profile-id=1;tier-flag=0;level-id=123\r\n"
             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+        const std::string hdrMain10Level5Sdp =
+            "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+            "a=rtpmap:96 H265/90000\r\n"
+            "a=fmtp:96 level-id=150;profile-id=2;tier-flag=0\r\n"
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
         const std::string hdrMain10LowerLevelSdp =
             "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
             "a=rtpmap:96 H265/90000\r\n"
@@ -313,6 +336,8 @@ int main()
             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
         require(gateway::hasExpectedHevcFormatParameters(
                     hdrMain10Sdp, settingsHdr1080)
+                    && gateway::hasExpectedHevcFormatParameters(
+                        hdrMain10Level5Sdp, settingsHdr1440)
                     && gateway::hasExpectedHevcFormatParameters(
                         hdrMain10LowerLevelSdp, settingsHdr1080)
                     && !gateway::hasExpectedHevcFormatParameters(
@@ -352,7 +377,9 @@ int main()
                            .get<bool>()
                     && capabilities.at("videoModes").at(1).at("hdrSupported")
                            .get<bool>()
-                    && !capabilities.at("videoModes").at(2).at("hdrSupported")
+                    && capabilities.at("videoModes").at(2).at("hdrSupported")
+                           .get<bool>()
+                    && capabilities.at("videoModes").at(2).at("hdrExperimental")
                            .get<bool>()
                     && capabilities.at("videoModes").at(3).at("hdrSupported")
                            .get<bool>()

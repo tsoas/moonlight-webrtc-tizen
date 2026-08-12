@@ -40,7 +40,7 @@ struct StreamSettings {
 inline constexpr std::array SupportedVideoModes{
     VideoMode{1280, 720, 60, true, true, VideoCodec::H264, 12000, false, false},
     VideoMode{1920, 1080, 60, true, true, VideoCodec::H264, 20000, false, true},
-    VideoMode{2560, 1440, 60, true, true, VideoCodec::HEVC, 30000, true, false},
+    VideoMode{2560, 1440, 60, true, true, VideoCodec::HEVC, 30000, true, true},
     VideoMode{3840, 2160, 60, false, true, VideoCodec::HEVC, 50000, false, true},
 };
 

@@ -129,7 +129,12 @@ std::optional<std::string> hevcFormatParameters(const StreamSettings& settings)
     if (const auto error = validateStreamSettings(settings)) {
         throw std::invalid_argument(*error);
     }
-    const int levelId = settings.width == 3840 ? 153 : 123;
+    int levelId = 123;
+    if (settings.width == 2560) {
+        levelId = 150;
+    } else if (settings.width == 3840) {
+        levelId = 153;
+    }
     return "profile-id=2;tier-flag=0;level-id=" + std::to_string(levelId);
 }
 

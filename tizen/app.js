@@ -898,7 +898,13 @@ hdrSelect.addEventListener("change", function () {
     codecSelect.value = "hevc";
     codecSelectionWasIntentional = true;
   }
-  updateHdrOptions(selectedVideoMode());
+  const mode = selectedVideoMode();
+  updateHdrOptions(mode);
+  if (mode && mode.experimental) {
+    setHomeMessage(hdrSelect.value === "true"
+      ? "1440p HDR — Experimental."
+      : "2560 × 1440 is experimental on Samsung Tizen.", false);
+  }
 });
 
 function updateRemoteTracksForVisibility() {

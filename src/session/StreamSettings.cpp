@@ -75,7 +75,7 @@ std::optional<std::string> validateStreamSettings(const StreamSettings& settings
         return "Unsupported resolution and codec combination";
     }
     if (settings.hdr && !videoModeSupportsHdr(*mode, settings.codec)) {
-        return "HDR is supported only with HEVC at 1080p60 or 4K60";
+        return "HDR is supported only with HEVC at 1080p60, 1440p60, or 4K60";
     }
     if (settings.audioChannels != 2) {
         return "Only stereo audio is supported";

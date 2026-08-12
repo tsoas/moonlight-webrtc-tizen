@@ -85,6 +85,8 @@ int main()
         const auto settingsHevc4k = gateway::defaultStreamSettings(3840, 2160);
         auto settingsHdr1080 = settingsHevc1080;
         settingsHdr1080.hdr = true;
+        auto settingsHdr1440 = settingsHevc1440;
+        settingsHdr1440.hdr = true;
         auto settingsHdr4k = settingsHevc4k;
         settingsHdr4k.hdr = true;
         const auto streamConfiguration =
@@ -152,7 +154,7 @@ int main()
                     && hdrProfile.hdr && hdrProfile.bitDepth == 10,
                 "HEVC HDR profile mapping is incorrect");
 
-        for (const auto& hdrSettings : {settingsHdr1080, settingsHdr4k}) {
+        for (const auto& hdrSettings : {settingsHdr1080, settingsHdr1440, settingsHdr4k}) {
             const auto hdrConfiguration =
                 gateway::moonlight::MoonlightSession::createStreamConfiguration(
                     hdrSettings);
@@ -204,6 +206,20 @@ int main()
                     && hdrAfterSdr.videoFormat == VIDEO_FORMAT_H265_MAIN10
                     && hdrAfterSdr.colorSpace == COLORSPACE_REC_2020,
                 "SDR/HDR profile selection leaked across sessions");
+
+        const auto sdr1440 = gateway::moonlight::moonlightVideoProfile(settingsHevc1440);
+        const auto hdr1440 = gateway::moonlight::moonlightVideoProfile(settingsHdr1440);
+        const auto sdr1080AfterHdr1440 =
+            gateway::moonlight::moonlightVideoProfile(settingsHevc1080);
+        require(settingsHdr1440.bitrateKbps == 30000
+                    && sdr1440.videoFormat == VIDEO_FORMAT_H265
+                    && sdr1440.colorSpace == COLORSPACE_REC_709
+                    && hdr1440.videoFormat == VIDEO_FORMAT_H265_MAIN10
+                    && hdr1440.colorSpace == COLORSPACE_REC_2020
+                    && hdr1440.colorRange == COLOR_RANGE_LIMITED
+                    && sdr1080AfterHdr1440.videoFormat == VIDEO_FORMAT_H265
+                    && sdr1080AfterHdr1440.colorSpace == COLORSPACE_REC_709,
+                "1440p SDR/HDR profile switching leaked session configuration");
 
         const auto launchQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
             7,
