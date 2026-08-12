@@ -190,14 +190,19 @@ DetectedSunshine MoonlightSession::detectSunshine(
     throw std::runtime_error("Sunshine was not detected locally (" + lastError + ")");
 }
 
-STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration()
+STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
+    const StreamSettings& settings)
 {
+    if (const auto error = validateStreamSettings(settings)) {
+        throw std::invalid_argument(*error);
+    }
+
     STREAM_CONFIGURATION configuration;
     LiInitializeStreamConfiguration(&configuration);
-    configuration.width = 1280;
-    configuration.height = 720;
-    configuration.fps = 60;
-    configuration.bitrate = 12000;
+    configuration.width = settings.width;
+    configuration.height = settings.height;
+    configuration.fps = settings.fps;
+    configuration.bitrate = settings.bitrateKbps;
     configuration.packetSize = 1392;
     configuration.streamingRemotely = STREAM_CFG_LOCAL;
     configuration.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
@@ -240,11 +245,13 @@ void MoonlightSession::start()
                 + std::to_string(application.id) + ")");
         }
 
-        const SunshineApp* application = SunshineHttpClient::findApplication(
-            applications, options_.application);
+        const SunshineApp* application = options_.applicationId
+            ? SunshineHttpClient::findApplicationById(
+                  applications, *options_.applicationId)
+            : SunshineHttpClient::findApplication(applications, options_.application);
         if (!application) {
             throw std::runtime_error(
-                "Requested Sunshine application was not found: " + options_.application);
+                "Requested Sunshine application was not found");
         }
 
         std::string verb = "launch";
@@ -256,14 +263,15 @@ void MoonlightSession::start()
             verb = "resume";
         }
 
-        streamConfiguration_ = createStreamConfiguration();
+        streamConfiguration_ = createStreamConfiguration(options_.settings);
         log("Host game optimizations: DISABLED");
         const std::string rtspSessionUrl = httpClient->launchOrResume(
             verb,
             application->id,
             streamConfiguration_,
             HostGameOptimizationsEnabled);
-        log(verb == "resume" ? "Sunshine Desktop resumed" : "Sunshine Desktop launched");
+        log("Sunshine application " + application->title
+            + (verb == "resume" ? " resumed" : " launched"));
         log("RTSP session URL obtained");
 
         serverInformation_ = std::make_unique<ServerInformationStorage>(

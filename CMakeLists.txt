@@ -33,6 +33,16 @@ target_compile_features(webrtc_media_sender PUBLIC cxx_std_20)
 target_include_directories(webrtc_media_sender PUBLIC src)
 target_link_libraries(webrtc_media_sender PUBLIC LibDataChannel::LibDataChannel)
 
+add_library(gateway_protocol
+    src/gateway/GatewayProtocol.cpp
+    src/session/StreamSettings.cpp
+    src/webrtc/SamsungSdp.cpp
+)
+
+target_compile_features(gateway_protocol PUBLIC cxx_std_20)
+target_include_directories(gateway_protocol PUBLIC src)
+target_link_libraries(gateway_protocol PUBLIC nlohmann_json::nlohmann_json)
+
 add_library(moonlight_media_bridge
     src/moonlight/MoonlightMediaBridge.cpp
 )
@@ -62,6 +72,7 @@ add_library(moonlight_control
 target_compile_features(moonlight_control PUBLIC cxx_std_20)
 target_include_directories(moonlight_control PUBLIC src)
 target_link_libraries(moonlight_control PUBLIC
+    gateway_protocol
     moonlight-common-c
     moonlight_media_bridge
     CURL::libcurl
@@ -78,6 +89,7 @@ add_executable(moonlight_webrtc
 
 target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
+    gateway_protocol
     h264_annex_b_reader
     moonlight_control
     moonlight_input_bridge
@@ -147,5 +159,15 @@ if(BUILD_TESTING)
     add_test(
         NAME moonlight_input_bridge_test
         COMMAND moonlight_input_bridge_test
+    )
+
+    add_executable(gateway_protocol_test
+        tests/GatewayProtocolTest.cpp
+    )
+    target_link_libraries(gateway_protocol_test PRIVATE gateway_protocol)
+
+    add_test(
+        NAME gateway_protocol_test
+        COMMAND gateway_protocol_test
     )
 endif()

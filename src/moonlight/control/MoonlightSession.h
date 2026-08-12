@@ -4,6 +4,7 @@
 #include "moonlight/MoonlightMediaBridge.h"
 #include "moonlight/control/MoonlightControlTypes.h"
 #include "moonlight/control/MoonlightIdentity.h"
+#include "session/StreamSettings.h"
 
 #include <atomic>
 #include <functional>
@@ -19,6 +20,8 @@ namespace gateway::moonlight {
 struct MoonlightSessionOptions {
     std::optional<std::string> host;
     std::string application = "Desktop";
+    std::optional<int> applicationId;
+    StreamSettings settings = defaultStreamSettings();
 };
 
 struct DetectedSunshine {
@@ -68,7 +71,7 @@ public:
     static DetectedSunshine detectSunshine(MoonlightIdentity& identity,
                                            const std::optional<std::string>& requestedHost,
                                            const Logger& logger);
-    static STREAM_CONFIGURATION createStreamConfiguration();
+    static STREAM_CONFIGURATION createStreamConfiguration(const StreamSettings& settings);
 
     // Sunshine uses SOPS as permission to change the host display mode. Stream
     // dimensions select encoder output only and must never alter Windows display state.

@@ -462,6 +462,17 @@ const SunshineApp* SunshineHttpClient::findApplication(
     return iterator == applications.end() ? nullptr : &*iterator;
 }
 
+const SunshineApp* SunshineHttpClient::findApplicationById(
+    std::vector<SunshineApp>& applications,
+    int id)
+{
+    const auto iterator = std::find_if(
+        applications.begin(), applications.end(), [id](const SunshineApp& application) {
+            return application.id == id;
+        });
+    return iterator == applications.end() ? nullptr : &*iterator;
+}
+
 std::string SunshineHttpClient::xmlValue(const std::string& xml,
                                          const std::string& elementName)
 {

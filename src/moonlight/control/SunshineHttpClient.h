@@ -62,6 +62,8 @@ public:
     static std::vector<SunshineApp> parseAppListXml(const std::string& xml);
     static const SunshineApp* findApplication(std::vector<SunshineApp>& applications,
                                                const std::string& name);
+    static const SunshineApp* findApplicationById(std::vector<SunshineApp>& applications,
+                                                  int id);
     static std::string xmlValue(const std::string& xml, const std::string& elementName);
     static std::vector<std::uint8_t> xmlHexValue(const std::string& xml,
                                                  const std::string& elementName);

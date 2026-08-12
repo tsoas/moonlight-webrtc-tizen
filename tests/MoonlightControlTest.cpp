@@ -72,8 +72,10 @@ int main()
             applications, "desktop");
         require(desktop && desktop->id == 7, "Case-insensitive Desktop lookup failed");
 
+        const auto settings720 = gateway::defaultStreamSettings();
+        const auto settings1080 = gateway::defaultStreamSettings(1920, 1080);
         const auto streamConfiguration =
-            gateway::moonlight::MoonlightSession::createStreamConfiguration();
+            gateway::moonlight::MoonlightSession::createStreamConfiguration(settings720);
         require(streamConfiguration.width == 1280 && streamConfiguration.height == 720
                     && streamConfiguration.fps == 60 && streamConfiguration.bitrate == 12000
                     && streamConfiguration.packetSize == 1392
@@ -84,6 +86,17 @@ int main()
                     && streamConfiguration.colorSpace == COLORSPACE_REC_709
                     && streamConfiguration.colorRange == COLOR_RANGE_LIMITED,
                 "STREAM_CONFIGURATION values are incorrect");
+
+        const auto streamConfiguration1080 =
+            gateway::moonlight::MoonlightSession::createStreamConfiguration(settings1080);
+        require(streamConfiguration1080.width == 1920
+                    && streamConfiguration1080.height == 1080
+                    && streamConfiguration1080.fps == 60
+                    && streamConfiguration1080.bitrate == 20000
+                    && streamConfiguration1080.supportedVideoFormats == VIDEO_FORMAT_H264
+                    && streamConfiguration1080.audioConfiguration
+                        == AUDIO_CONFIGURATION_STEREO,
+                "1080p STREAM_CONFIGURATION values are incorrect");
 
         const auto launchQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
             7,
@@ -96,6 +109,22 @@ int main()
         require(!gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled
                     && sops != launchQuery.end() && sops->second == "0",
                 "Sunshine host game optimizations were not explicitly disabled");
+
+        const auto launchQuery1080 = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
+            7,
+            streamConfiguration1080,
+            gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled);
+        const auto sops1080 = std::find_if(
+            launchQuery1080.begin(), launchQuery1080.end(), [](const auto& item) {
+                return item.first == "sops";
+            });
+        require(sops1080 != launchQuery1080.end() && sops1080->second == "0",
+                "Sunshine host game optimizations changed for 1080p");
+
+        const auto* desktopById =
+            gateway::moonlight::SunshineHttpClient::findApplicationById(applications, 7);
+        require(desktopById && desktopById->title == "Desktop",
+                "Sunshine application ID lookup failed");
 
         gateway::moonlight::ServerInformationStorage serverStorage(
             serverInfo, "127.0.0.1", "rtsp://session-url");

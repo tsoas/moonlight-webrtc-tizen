@@ -1,5 +1,6 @@
 #include "H264AnnexBReader.h"
 #include "OpusFileReader.h"
+#include "gateway/GatewayProtocol.h"
 #include "media/MediaSender.h"
 #include "moonlight/MoonlightMediaBridge.h"
 #include "moonlight/control/MoonlightIdentity.h"
@@ -7,10 +8,13 @@
 #include "moonlight/control/MoonlightSession.h"
 #include "moonlight/control/SunshineHttpClient.h"
 #include "moonlight/input/MoonlightInputBridge.h"
+#include "session/StreamSettings.h"
+#include "webrtc/SamsungSdp.h"
 #include "webrtc/WebRtcMediaSender.h"
 
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <csignal>
 #include <condition_variable>
 #include <cstdint>
@@ -45,50 +49,11 @@ constexpr auto VideoSamplePath = "samples/test-720p60.h264";
 constexpr auto AudioSamplePath = "samples/test-tone-48k-stereo.opus";
 constexpr auto RtpCname = "moonlight-webrtc";
 constexpr auto MediaStreamId = "stream1";
-constexpr std::string_view SamsungGameModeImageAttribute =
-    "imageattr:96 send [x=[1280:1280],y=[720:720],fps=[60:60]]";
-constexpr std::string_view SamsungGameModeSdpLine =
-    "a=imageattr:96 send [x=[1280:1280],y=[720:720],fps=[60:60]]";
 volatile std::sig_atomic_t ShutdownRequested = 0;
 
 void requestShutdown(int)
 {
     ShutdownRequested = 1;
-}
-
-bool hasValidSamsungGameModeImageAttribute(std::string_view sdp)
-{
-    for (std::size_t index = 0; index < sdp.size(); ++index) {
-        if ((sdp[index] == '\n' && (index == 0 || sdp[index - 1] != '\r'))
-            || (sdp[index] == '\r'
-                && (index + 1 == sdp.size() || sdp[index + 1] != '\n'))) {
-            return false;
-        }
-    }
-
-    const auto attributePosition = sdp.find(SamsungGameModeSdpLine);
-    if (attributePosition == std::string_view::npos
-        || sdp.find(SamsungGameModeSdpLine,
-                    attributePosition + SamsungGameModeSdpLine.size())
-            != std::string_view::npos
-        || sdp.find("a=imageattr:") != attributePosition
-        || sdp.find("a=imageattr:", attributePosition + 1) != std::string_view::npos) {
-        return false;
-    }
-
-    const bool completeLine =
-        (attributePosition == 0
-         || sdp.substr(attributePosition - 2, 2) == "\r\n")
-        && sdp.substr(attributePosition + SamsungGameModeSdpLine.size(), 2) == "\r\n";
-    const auto videoPosition = sdp.find("m=video ");
-    const auto nextMediaPosition = videoPosition == std::string_view::npos
-        ? std::string_view::npos
-        : sdp.find("\r\nm=", videoPosition + 1);
-
-    return completeLine && videoPosition != std::string_view::npos
-        && attributePosition > videoPosition
-        && (nextMediaPosition == std::string_view::npos
-            || attributePosition < nextMediaPosition);
 }
 
 std::string_view videoMediaSection(std::string_view sdp)
@@ -197,6 +162,10 @@ struct Session {
     std::shared_ptr<gateway::moonlight::MoonlightInputBridge> inputBridge;
     std::uint32_t videoRtpStartTimestamp = 0;
     std::uint32_t audioRtpStartTimestamp = 0;
+    std::uint64_t sessionId = 0;
+    gateway::StreamSettings settings = gateway::defaultStreamSettings();
+    std::optional<int> applicationId;
+    bool streamingActive = false;
 
     std::mutex sendMutex;
     std::mutex candidateMutex;
@@ -225,6 +194,7 @@ public:
                         : nullptr)
         , server_(makeServerConfiguration())
     {
+        log("Moonlight WebRTC Gateway");
         server_.onClient([this](std::shared_ptr<rtc::WebSocket> socket) {
             acceptClient(std::move(socket));
         });
@@ -257,11 +227,7 @@ public:
             session = std::exchange(activeSession_, nullptr);
         }
         if (session) {
-            session->requestStreamingStop();
-            session->stopStreaming();
-            if (session->peerConnection) {
-                session->peerConnection->close();
-            }
+            stopActiveSession(session, false);
         }
     }
 
@@ -309,7 +275,7 @@ private:
         session->socket->onOpen([this, weakSession] {
             if (const auto currentSession = weakSession.lock()) {
                 log("WebSocket client connected");
-                createPeerConnection(currentSession);
+                sendInitialState(currentSession);
             }
         });
 
@@ -336,10 +302,19 @@ private:
             });
     }
 
-    void createPeerConnection(const std::shared_ptr<Session>& session)
+    bool isCurrentSession(const std::shared_ptr<Session>& session,
+                          std::uint64_t sessionId)
+    {
+        const std::lock_guard lock(session->streamMutex);
+        return session->sessionId == sessionId && sessionId != 0;
+    }
+
+    void createPeerConnection(const std::shared_ptr<Session>& session,
+                              std::uint64_t sessionId,
+                              const gateway::StreamSettings& settings)
     {
         if (session->peerConnection) {
-            return;
+            throw std::runtime_error("A WebRTC session is already active");
         }
 
         rtc::Configuration configuration;
@@ -350,12 +325,13 @@ private:
         const std::weak_ptr<Session> weakSession = session;
 
         peerConnection->onStateChange(
-            [this, weakSession](rtc::PeerConnection::State state) {
+            [this, weakSession, sessionId](rtc::PeerConnection::State state) {
                 std::ostringstream message;
                 message << "PeerConnection state: " << state;
                 log(message.str());
 
-                if (const auto currentSession = weakSession.lock()) {
+                if (const auto currentSession = weakSession.lock();
+                    currentSession && isCurrentSession(currentSession, sessionId)) {
                     {
                         const std::lock_guard lock(currentSession->streamMutex);
                         currentSession->peerConnected =
@@ -381,23 +357,28 @@ private:
         });
 
         peerConnection->onLocalDescription(
-            [this, weakSession](rtc::Description description) {
+            [this, weakSession, sessionId, settings](rtc::Description description) {
                 if (description.type() != rtc::Description::Type::Offer) {
                     return;
                 }
 
-                if (const auto currentSession = weakSession.lock()) {
+                if (const auto currentSession = weakSession.lock();
+                    currentSession && isCurrentSession(currentSession, sessionId)) {
                     const std::string sdp = std::string(description);
-                    if (!hasValidSamsungGameModeImageAttribute(sdp)) {
+                    if (!gateway::hasValidSamsungGameModeImageAttribute(sdp, settings)) {
                         log("Samsung Game Mode SDP imageattr validation failed");
+                        sendSessionStatus(currentSession,
+                                          "error",
+                                          "Invalid Samsung Game Mode SDP imageattr");
                         currentSession->requestStreamingStop();
-                        currentSession->socket->close();
                         return;
                     }
                     if (!hasDataChannelApplicationSection(sdp)) {
                         log("WebRTC data-channel SDP validation failed");
+                        sendSessionStatus(currentSession,
+                                          "error",
+                                          "Missing WebRTC data-channel SDP section");
                         currentSession->requestStreamingStop();
-                        currentSession->socket->close();
                         return;
                     }
 
@@ -406,25 +387,26 @@ private:
                     log("Outgoing SDP m=video section:\n"
                         + std::string(videoMediaSection(sdp)));
                     sendJson(currentSession,
-                             {{"type", "offer"}, {"sdp", sdp}});
+                             gateway::protocol::makeOffer(sessionId, sdp));
                     log("Sent SDP offer");
                 }
             });
 
-        peerConnection->onLocalCandidate([this, weakSession](rtc::Candidate candidate) {
-            if (const auto currentSession = weakSession.lock()) {
+        peerConnection->onLocalCandidate(
+            [this, weakSession, sessionId](rtc::Candidate candidate) {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
                 const std::string candidateText = candidate.candidate();
                 sendJson(currentSession,
-                         {{"type", "candidate"},
-                          {"candidate", candidateText},
-                          {"mid", candidate.mid()}});
+                         gateway::protocol::makeCandidate(
+                             sessionId, candidateText, candidate.mid()));
                 log("Sent ICE candidate: " + candidateText);
             }
         });
 
-        session->inputBridge =
-            std::make_shared<gateway::moonlight::MoonlightInputBridge>(
-                [this](const std::string& message) { log(message); });
+        auto inputBridge = std::make_shared<gateway::moonlight::MoonlightInputBridge>(
+            [this](const std::string& message) { log(message); });
+        session->inputBridge = inputBridge;
 
         rtc::DataChannelInit controlChannelOptions;
         controlChannelOptions.reliability.unordered = false;
@@ -435,24 +417,29 @@ private:
         session->controlChannel->onOpen([this] {
             log("Control DataChannel opened");
         });
-        session->controlChannel->onClosed([this, weakSession] {
+        session->controlChannel->onClosed([this, weakSession, inputBridge, sessionId] {
             log("Control DataChannel closed");
-            if (const auto currentSession = weakSession.lock()) {
-                currentSession->inputBridge->onTransportClosed();
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
+                inputBridge->onTransportClosed();
             }
         });
-        session->controlChannel->onError([this, weakSession](const std::string& error) {
+        session->controlChannel->onError(
+            [this, weakSession, inputBridge, sessionId](const std::string& error) {
             log("Control DataChannel error: " + error);
-            if (const auto currentSession = weakSession.lock()) {
-                currentSession->inputBridge->onTransportClosed();
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
+                inputBridge->onTransportClosed();
             }
         });
-        session->controlChannel->onMessage([this, weakSession](rtc::message_variant data) {
+        session->controlChannel->onMessage(
+            [this, weakSession, inputBridge, sessionId](rtc::message_variant data) {
             const auto currentSession = weakSession.lock();
-            if (!currentSession || !std::holds_alternative<std::string>(data)) {
+            if (!currentSession || !isCurrentSession(currentSession, sessionId)
+                || !std::holds_alternative<std::string>(data)) {
                 return;
             }
-            if (!currentSession->inputBridge->handleControlMessage(
+            if (!inputBridge->handleControlMessage(
                     std::get<std::string>(std::move(data)))) {
                 log("Rejected malformed gamepad control message");
             }
@@ -468,24 +455,29 @@ private:
         session->gamepadChannel->onOpen([this] {
             log("Gamepad DataChannel opened");
         });
-        session->gamepadChannel->onClosed([this, weakSession] {
+        session->gamepadChannel->onClosed([this, weakSession, inputBridge, sessionId] {
             log("Gamepad DataChannel closed");
-            if (const auto currentSession = weakSession.lock()) {
-                currentSession->inputBridge->onTransportClosed();
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
+                inputBridge->onTransportClosed();
             }
         });
-        session->gamepadChannel->onError([this, weakSession](const std::string& error) {
+        session->gamepadChannel->onError(
+            [this, weakSession, inputBridge, sessionId](const std::string& error) {
             log("Gamepad DataChannel error: " + error);
-            if (const auto currentSession = weakSession.lock()) {
-                currentSession->inputBridge->onTransportClosed();
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
+                inputBridge->onTransportClosed();
             }
         });
-        session->gamepadChannel->onMessage([this, weakSession](rtc::message_variant data) {
+        session->gamepadChannel->onMessage(
+            [this, weakSession, inputBridge, sessionId](rtc::message_variant data) {
             const auto currentSession = weakSession.lock();
-            if (!currentSession || !std::holds_alternative<std::string>(data)) {
+            if (!currentSession || !isCurrentSession(currentSession, sessionId)
+                || !std::holds_alternative<std::string>(data)) {
                 return;
             }
-            if (!currentSession->inputBridge->handleGamepadMessage(
+            if (!inputBridge->handleGamepadMessage(
                     std::get<std::string>(std::move(data)))
                 && !currentSession->malformedGamepadMessageReported.exchange(true)) {
                 log("Rejected malformed or stale gamepad state message");
@@ -494,7 +486,7 @@ private:
 
         rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
         video.addH264Codec(VideoPayloadType);
-        video.addAttribute(std::string(SamsungGameModeImageAttribute));
+        video.addAttribute(gateway::samsungGameModeImageAttribute(settings));
         video.addSSRC(VideoSsrc, RtpCname, MediaStreamId, "video");
 
         session->videoTrack = peerConnection->addTrack(video);
@@ -509,8 +501,10 @@ private:
             rtc::NalUnit::Separator::StartSequence, rtpConfiguration);
         packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfiguration));
         packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
-        packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, weakSession] {
-            if (const auto currentSession = weakSession.lock()) {
+        packetizer->addToChain(std::make_shared<rtc::PliHandler>(
+            [this, weakSession, sessionId] {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
                 const auto requestNumber = currentSession->keyframeRequestCount.fetch_add(
                                                1, std::memory_order_relaxed)
                     + 1;
@@ -534,8 +528,9 @@ private:
         }));
         session->videoTrack->setMediaHandler(packetizer);
 
-        session->videoTrack->onOpen([this, weakSession] {
-            if (const auto currentSession = weakSession.lock()) {
+        session->videoTrack->onOpen([this, weakSession, sessionId] {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
                 {
                     const std::lock_guard lock(currentSession->streamMutex);
                     currentSession->videoTrackOpen = true;
@@ -545,8 +540,9 @@ private:
             }
         });
 
-        session->videoTrack->onClosed([weakSession] {
-            if (const auto currentSession = weakSession.lock()) {
+        session->videoTrack->onClosed([this, weakSession, sessionId] {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
                 currentSession->requestStreamingStop();
             }
         });
@@ -572,8 +568,9 @@ private:
         audioPacketizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
         session->audioTrack->setMediaHandler(audioPacketizer);
 
-        session->audioTrack->onOpen([this, weakSession] {
-            if (const auto currentSession = weakSession.lock()) {
+        session->audioTrack->onOpen([this, weakSession, sessionId] {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
                 {
                     const std::lock_guard lock(currentSession->streamMutex);
                     currentSession->audioTrackOpen = true;
@@ -583,8 +580,9 @@ private:
             }
         });
 
-        session->audioTrack->onClosed([weakSession] {
-            if (const auto currentSession = weakSession.lock()) {
+        session->audioTrack->onClosed([this, weakSession, sessionId] {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
                 currentSession->requestStreamingStop();
             }
         });
@@ -592,11 +590,14 @@ private:
         session->mediaSender = std::make_shared<gateway::WebRtcMediaSender>(
             session->videoTrack, session->audioTrack);
 
-        session->streamingThread = std::thread([this, sessionPointer = session.get()] {
-            if (sourceMode_ == MediaSourceMode::Moonlight) {
-                streamMoonlightMedia(*sessionPointer);
-            } else {
-                streamTestMedia(*sessionPointer);
+        session->streamingThread = std::thread([this, weakSession, sessionId] {
+            if (const auto currentSession = weakSession.lock();
+                currentSession && isCurrentSession(currentSession, sessionId)) {
+                if (sourceMode_ == MediaSourceMode::Moonlight) {
+                    streamMoonlightMedia(currentSession);
+                } else {
+                    streamTestMedia(*currentSession);
+                }
             }
         });
 
@@ -613,38 +614,56 @@ private:
         return !session.stopRequested;
     }
 
-    void streamMoonlightMedia(Session& session)
+    void streamMoonlightMedia(const std::shared_ptr<Session>& session)
     {
-        if (!waitForMediaTracks(session)) {
+        if (!waitForMediaTracks(*session)) {
             return;
         }
 
+        sendSessionStatus(session, "connecting-sunshine");
+        auto options = moonlightOptions_;
+        options.applicationId = session->applicationId;
+        options.settings = session->settings;
+
         auto moonlightSession = std::make_shared<gateway::moonlight::MoonlightSession>(
-            *session.mediaSender,
+            *session->mediaSender,
             *identity_,
-            moonlightOptions_,
+            std::move(options),
             [this](const std::string& message) { log(message); },
-            [&session] { session.requestStreamingStop(); });
+            [weakSession = std::weak_ptr<Session>(session)] {
+                if (const auto currentSession = weakSession.lock()) {
+                    currentSession->requestStreamingStop();
+                }
+            });
         {
-            const std::lock_guard lock(session.streamMutex);
-            session.moonlightSession = moonlightSession;
+            const std::lock_guard lock(session->streamMutex);
+            session->moonlightSession = moonlightSession;
         }
 
         try {
+            sendSessionStatus(session, "starting-moonlight");
             moonlightSession->start();
-            session.inputBridge->setMoonlightSessionActive(true);
-            std::unique_lock lock(session.streamMutex);
-            session.streamCondition.wait(lock, [&session] { return session.stopRequested; });
+            session->inputBridge->setMoonlightSessionActive(true);
+            {
+                const std::lock_guard lock(session->streamMutex);
+                session->streamingActive = true;
+            }
+            sendSessionStatus(session, "streaming");
+            std::unique_lock lock(session->streamMutex);
+            session->streamCondition.wait(
+                lock, [&session] { return session->stopRequested; });
         } catch (const std::exception& error) {
             log("Moonlight streaming error: " + std::string(error.what()));
-            session.requestStreamingStop();
+            sendSessionStatus(session, "error", error.what());
+            session->requestStreamingStop();
         }
 
-        session.inputBridge->setMoonlightSessionActive(false);
+        session->inputBridge->setMoonlightSessionActive(false);
         moonlightSession->stop();
         {
-            const std::lock_guard lock(session.streamMutex);
-            session.moonlightSession.reset();
+            const std::lock_guard lock(session->streamMutex);
+            session->streamingActive = false;
+            session->moonlightSession.reset();
         }
         log("Moonlight streaming stopped");
     }
@@ -786,26 +805,302 @@ private:
         log("Audio streaming stopped");
     }
 
-    void handleMessage(const std::shared_ptr<Session>& session, const std::string& text)
+    gateway::protocol::GatewayStatus gatewayStatus(
+        const std::shared_ptr<Session>& session)
+    {
+        gateway::protocol::GatewayStatus status;
+        {
+            const std::lock_guard lock(session->streamMutex);
+            status.sessionActive = session->sessionId != 0;
+        }
+
+        if (sourceMode_ == MediaSourceMode::Test) {
+            return status;
+        }
+
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                    log(message);
+                });
+            status.sunshineDetected = true;
+            status.sunshinePaired = detected.pairedHost.has_value()
+                && detected.serverInfo.pairStatus == 1;
+        } catch (const std::exception& error) {
+            log("Sunshine status unavailable: " + std::string(error.what()));
+        }
+        return status;
+    }
+
+    std::vector<gateway::protocol::Application> loadApplications()
+    {
+        if (sourceMode_ == MediaSourceMode::Test) {
+            return {{"test", "Test Media"}};
+        }
+
+        const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+            *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                log(message);
+            });
+        if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
+            throw std::runtime_error("Moonlight WebRTC Gateway is not paired with Sunshine");
+        }
+
+        gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+        client.setHttpsPort(detected.serverInfo.httpsPort);
+        client.setPinnedServerCertificate(
+            detected.pairedHost->serverCertificatePem);
+
+        std::vector<gateway::protocol::Application> result;
+        for (const auto& application : client.getAppList()) {
+            result.push_back(
+                {std::to_string(application.id), application.title});
+        }
+        return result;
+    }
+
+    void sendInitialState(const std::shared_ptr<Session>& session)
+    {
+        sendJson(session, gateway::protocol::makeGatewayStatus(gatewayStatus(session)));
+        sendJson(session, gateway::protocol::makeCapabilities());
+        sendJson(session, gateway::protocol::makeSessionStatus("idle"));
+    }
+
+    void sendApplications(const std::shared_ptr<Session>& session)
     {
         try {
-            const Json message = Json::parse(text);
-            const std::string type = message.at("type").get<std::string>();
-
-            if (type == "answer") {
-                handleAnswer(session, message.at("sdp").get<std::string>());
-            } else if (type == "candidate") {
-                handleCandidate(session,
-                                message.at("candidate").get<std::string>(),
-                                message.at("mid").get<std::string>());
-            }
+            const auto applications = loadApplications();
+            sendJson(session, gateway::protocol::makeApps(applications));
+            log("Sent " + std::to_string(applications.size())
+                + " Sunshine applications");
         } catch (const std::exception& error) {
-            log("Signaling error: " + std::string(error.what()));
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         "get-apps", "sunshine-unavailable", error.what()));
         }
     }
 
-    void handleAnswer(const std::shared_ptr<Session>& session, const std::string& sdp)
+    void sendSessionStatus(const std::shared_ptr<Session>& session,
+                           std::string_view state,
+                           std::string_view detail = {})
     {
+        std::optional<std::uint64_t> sessionId;
+        std::optional<gateway::StreamSettings> settings;
+        {
+            const std::lock_guard lock(session->streamMutex);
+            if (session->sessionId != 0) {
+                sessionId = session->sessionId;
+                settings = session->settings;
+            }
+        }
+        sendJson(session,
+                 gateway::protocol::makeSessionStatus(
+                     state,
+                     sessionId,
+                     settings,
+                     detail.empty()
+                         ? std::nullopt
+                         : std::optional<std::string>(detail)));
+        log("Session status: " + std::string(state));
+    }
+
+    void startSession(
+        const std::shared_ptr<Session>& session,
+        const gateway::protocol::StartSessionRequest& request)
+    {
+        {
+            const std::lock_guard lock(session->streamMutex);
+            if (session->sessionId != 0 || session->peerConnection) {
+                sendJson(session,
+                         gateway::protocol::makeError(
+                             "start-session",
+                             "session-active",
+                             "Stop the active session before starting another"));
+                return;
+            }
+        }
+
+        std::optional<int> numericApplicationId;
+        std::string applicationTitle;
+        try {
+            const auto applications = loadApplications();
+            const auto application = std::ranges::find_if(
+                applications, [&request](const auto& candidate) {
+                    return candidate.id == request.appId;
+                });
+            if (application == applications.end()) {
+                throw std::runtime_error("Selected Sunshine application no longer exists");
+            }
+            applicationTitle = application->title;
+
+            if (sourceMode_ == MediaSourceMode::Moonlight) {
+                int value = 0;
+                const auto result = std::from_chars(
+                    request.appId.data(),
+                    request.appId.data() + request.appId.size(),
+                    value);
+                if (result.ec != std::errc()
+                    || result.ptr != request.appId.data() + request.appId.size()
+                    || value < 0) {
+                    throw std::runtime_error("Invalid Sunshine application ID");
+                }
+                numericApplicationId = value;
+            }
+        } catch (const std::exception& error) {
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         "start-session", "invalid-application", error.what()));
+            return;
+        }
+
+        const auto sessionId = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
+        log("Validated session settings: app=" + applicationTitle + ", video="
+            + std::to_string(request.settings.width) + "x"
+            + std::to_string(request.settings.height) + "@"
+            + std::to_string(request.settings.fps) + ", codec="
+            + std::string(gateway::videoCodecName(request.settings.codec))
+            + ", bitrate=" + std::to_string(request.settings.bitrateKbps)
+            + " kbps, HDR=OFF, audio=stereo 48000 Hz");
+        {
+            const std::lock_guard lock(session->streamMutex);
+            session->sessionId = sessionId;
+            session->settings = request.settings;
+            session->applicationId = numericApplicationId;
+            session->peerConnected = false;
+            session->videoTrackOpen = false;
+            session->audioTrackOpen = false;
+            session->stopRequested = false;
+            session->streamingActive = false;
+        }
+        {
+            const std::lock_guard lock(session->candidateMutex);
+            session->hasRemoteDescription = false;
+            session->pendingCandidates.clear();
+        }
+        session->videoKeyframeRequested.store(false);
+        session->keyframeRequestCount.store(0);
+        session->malformedGamepadMessageReported.store(false);
+
+        sendSessionStatus(session, "starting");
+        sendSessionStatus(session, "starting-webrtc");
+        try {
+            createPeerConnection(session, sessionId, request.settings);
+        } catch (const std::exception& error) {
+            log("Session startup failed: " + std::string(error.what()));
+            sendSessionStatus(session, "error", error.what());
+            stopActiveSession(session, true);
+        }
+    }
+
+    void stopActiveSession(const std::shared_ptr<Session>& session,
+                           bool notifyClient)
+    {
+        std::uint64_t sessionId = 0;
+        std::shared_ptr<gateway::moonlight::MoonlightInputBridge> inputBridge;
+        std::shared_ptr<rtc::PeerConnection> peerConnection;
+        {
+            const std::lock_guard lock(session->streamMutex);
+            sessionId = session->sessionId;
+            inputBridge = session->inputBridge;
+            peerConnection = session->peerConnection;
+        }
+
+        if (sessionId == 0) {
+            if (notifyClient) {
+                sendJson(session, gateway::protocol::makeSessionStatus("idle"));
+            }
+            return;
+        }
+
+        if (notifyClient) {
+            sendSessionStatus(session, "stopping");
+        }
+        if (inputBridge) {
+            inputBridge->onTransportClosed();
+        }
+        session->stopStreaming();
+        if (peerConnection) {
+            peerConnection->close();
+        }
+
+        {
+            const std::lock_guard lock(session->streamMutex);
+            session->sessionId = 0;
+            session->peerConnection.reset();
+            session->videoTrack.reset();
+            session->audioTrack.reset();
+            session->controlChannel.reset();
+            session->gamepadChannel.reset();
+            session->mediaSender.reset();
+            session->moonlightSession.reset();
+            session->inputBridge.reset();
+            session->applicationId.reset();
+            session->peerConnected = false;
+            session->videoTrackOpen = false;
+            session->audioTrackOpen = false;
+            session->streamingActive = false;
+        }
+        {
+            const std::lock_guard lock(session->candidateMutex);
+            session->hasRemoteDescription = false;
+            session->pendingCandidates.clear();
+        }
+
+        log("Session " + std::to_string(sessionId) + " stopped; Gateway remains idle");
+        if (notifyClient) {
+            sendJson(session, gateway::protocol::makeSessionStatus("idle"));
+            sendJson(session,
+                     gateway::protocol::makeGatewayStatus(gatewayStatus(session)));
+        }
+    }
+
+    void handleMessage(const std::shared_ptr<Session>& session, const std::string& text)
+    {
+        try {
+            const auto message = gateway::protocol::parseClientMessage(text);
+            if (std::holds_alternative<gateway::protocol::GetAppsRequest>(
+                    message.payload)) {
+                sendApplications(session);
+            } else if (const auto* start =
+                           std::get_if<gateway::protocol::StartSessionRequest>(
+                               &message.payload)) {
+                startSession(session, *start);
+            } else if (std::holds_alternative<gateway::protocol::StopSessionRequest>(
+                           message.payload)) {
+                stopActiveSession(session, true);
+            } else if (const auto* answer =
+                           std::get_if<gateway::protocol::AnswerMessage>(
+                               &message.payload)) {
+                handleAnswer(session, answer->sessionId, answer->sdp);
+            } else if (const auto* candidate =
+                           std::get_if<gateway::protocol::CandidateMessage>(
+                               &message.payload)) {
+                handleCandidate(session,
+                                candidate->sessionId,
+                                candidate->candidate,
+                                candidate->mid);
+            }
+        } catch (const gateway::protocol::ProtocolError& error) {
+            log("Gateway protocol error: " + std::string(error.what()));
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         "unknown", error.code(), error.what()));
+        } catch (const std::exception& error) {
+            log("Gateway control error: " + std::string(error.what()));
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         "unknown", "internal-error", error.what()));
+        }
+    }
+
+    void handleAnswer(const std::shared_ptr<Session>& session,
+                      std::uint64_t sessionId,
+                      const std::string& sdp)
+    {
+        if (!isCurrentSession(session, sessionId)) {
+            log("Ignored SDP answer for inactive session " + std::to_string(sessionId));
+            return;
+        }
         const auto peerConnection = session->peerConnection;
         if (!peerConnection) {
             return;
@@ -829,9 +1124,15 @@ private:
     }
 
     void handleCandidate(const std::shared_ptr<Session>& session,
+                         std::uint64_t sessionId,
                          std::string candidate,
                          std::string mid)
     {
+        if (!isCurrentSession(session, sessionId)) {
+            log("Ignored ICE candidate for inactive session "
+                + std::to_string(sessionId));
+            return;
+        }
         const auto peerConnection = session->peerConnection;
         if (!peerConnection) {
             return;
@@ -861,14 +1162,7 @@ private:
 
     void closeSession(const std::shared_ptr<Session>& session)
     {
-        if (session->inputBridge) {
-            session->inputBridge->onTransportClosed();
-        }
-        session->stopStreaming();
-
-        if (session->peerConnection) {
-            session->peerConnection->close();
-        }
+        stopActiveSession(session, false);
 
         const std::lock_guard lock(sessionMutex_);
         if (activeSession_ == session) {
@@ -884,6 +1178,7 @@ private:
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;
+    std::atomic<std::uint64_t> nextSessionId_ = 1;
     rtc::WebSocketServer server_;
 
     std::mutex waitMutex_;
