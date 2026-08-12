@@ -49,7 +49,10 @@ add_library(moonlight_media_bridge
 
 target_compile_features(moonlight_media_bridge PUBLIC cxx_std_20)
 target_include_directories(moonlight_media_bridge PUBLIC src)
-target_link_libraries(moonlight_media_bridge PUBLIC moonlight-common-c)
+target_link_libraries(moonlight_media_bridge PUBLIC
+    gateway_protocol
+    moonlight-common-c
+)
 
 add_library(moonlight_input_bridge
     src/moonlight/input/MoonlightInputBridge.cpp
@@ -169,5 +172,15 @@ if(BUILD_TESTING)
     add_test(
         NAME gateway_protocol_test
         COMMAND gateway_protocol_test
+    )
+
+    add_executable(webrtc_media_sender_test
+        tests/WebRtcMediaSenderTest.cpp
+    )
+    target_link_libraries(webrtc_media_sender_test PRIVATE webrtc_media_sender)
+
+    add_test(
+        NAME webrtc_media_sender_test
+        COMMAND webrtc_media_sender_test
     )
 endif()

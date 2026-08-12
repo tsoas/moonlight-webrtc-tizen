@@ -14,6 +14,7 @@ const streamOverlay = document.getElementById("stream-overlay");
 const streamMenu = document.getElementById("stream-menu");
 const appSelect = document.getElementById("app-select");
 const resolutionSelect = document.getElementById("resolution-select");
+const codecSelect = document.getElementById("codec-select");
 const bitrateSelect = document.getElementById("bitrate-select");
 const playButton = document.getElementById("play-button");
 const continueButton = document.getElementById("continue-button");
@@ -44,6 +45,11 @@ const trackCounts = {
 };
 
 const statistics = {
+  requestedResolution: document.getElementById("requested-resolution"),
+  requestedCodec: document.getElementById("requested-codec"),
+  requestedBitrate: document.getElementById("requested-bitrate"),
+  actualResolution: document.getElementById("actual-resolution"),
+  receivedCodec: document.getElementById("received-codec"),
   video: {
     framesReceived: document.getElementById("frames-received"),
     framesDecoded: document.getElementById("frames-decoded"),
@@ -118,6 +124,10 @@ let lastGamepadFingerprint = "";
 let lastFullStateSendTime = 0;
 let inputRateWindowStart = performance.now();
 let inputMessagesInWindow = 0;
+let videoModes = [];
+let codecSelectionWasIntentional = false;
+let updatingCodecOptions = false;
+let lastStatisticsConsoleTime = 0;
 
 function log(message) {
   console.log(message);
@@ -281,13 +291,18 @@ function replaceSelectOptions(select, values, formatter) {
 }
 
 function applyCapabilities(message) {
-  if (Array.isArray(message.resolutions) && message.resolutions.length > 0) {
-    replaceSelectOptions(resolutionSelect, message.resolutions, {
-      value: function (resolution) {
-        return String(resolution.width) + "x" + String(resolution.height);
+  videoModes = Array.isArray(message.videoModes) ? message.videoModes : [];
+  if (videoModes.length > 0) {
+    replaceSelectOptions(resolutionSelect, videoModes, {
+      value: function (mode) {
+        return String(mode.width) + "x" + String(mode.height);
       },
-      label: function (resolution) {
-        return String(resolution.width) + " × " + String(resolution.height);
+      label: function (mode) {
+        const base = String(mode.width) + " × " + String(mode.height);
+        if (mode.experimental) {
+          return base + " — Experimental";
+        }
+        return mode.width === 3840 && mode.height === 2160 ? base + " — 4K" : base;
       },
     });
   }
@@ -298,7 +313,41 @@ function applyCapabilities(message) {
     });
   }
   resolutionSelect.value = "1280x720";
-  bitrateSelect.value = "12000";
+  codecSelectionWasIntentional = false;
+  applySelectedVideoMode();
+}
+
+function selectedVideoMode() {
+  return videoModes.find(function (mode) {
+    return String(mode.width) + "x" + String(mode.height) === resolutionSelect.value;
+  }) || null;
+}
+
+function codecDisplayName(codec) {
+  return codec === "hevc" ? "HEVC (H.265)" : "H.264";
+}
+
+function applySelectedVideoMode() {
+  const mode = selectedVideoMode();
+  if (!mode || !Array.isArray(mode.codecs) || mode.codecs.length === 0) {
+    return;
+  }
+  const previousCodec = codecSelect.value;
+  const keepIntentionalCodec = codecSelectionWasIntentional
+    && mode.codecs.indexOf(previousCodec) >= 0;
+  updatingCodecOptions = true;
+  replaceSelectOptions(codecSelect, mode.codecs, {
+    value: function (codec) { return codec; },
+    label: codecDisplayName,
+  });
+  codecSelect.value = keepIntentionalCodec ? previousCodec : mode.defaultCodec;
+  updatingCodecOptions = false;
+  bitrateSelect.value = String(mode.defaultBitrateKbps);
+  if (mode.experimental) {
+    setHomeMessage("2560 × 1440 is experimental on Samsung Tizen.", false);
+  } else if (appsLoaded) {
+    setHomeMessage("Choose settings, then press PLAY.", false);
+  }
 }
 
 function applyApplications(applications) {
@@ -367,6 +416,7 @@ function handleSessionStatus(message) {
   overlay.connection.textContent = readableState(message.state);
   if (message.state === "streaming") {
     showStreaming();
+    resumeGamepadInput();
     setHomeMessage("Streaming", false);
   } else if (message.state === "idle") {
     closePeerConnection();
@@ -396,7 +446,7 @@ function selectedSettings() {
     width: Number(dimensions[0]),
     height: Number(dimensions[1]),
     fps: 60,
-    codec: "h264",
+    codec: codecSelect.value,
     bitrateKbps: Number(bitrateSelect.value),
     hdr: false,
   };
@@ -641,7 +691,7 @@ function updateStreamOverlay() {
   overlay.resolution.textContent = String(selectedSession.width) + " × "
     + String(selectedSession.height);
   overlay.fps.textContent = String(selectedSession.fps);
-  overlay.codec.textContent = String(selectedSession.codec).toUpperCase();
+  overlay.codec.textContent = codecDisplayName(selectedSession.codec);
   overlay.bitrate.textContent = String(selectedSession.bitrateKbps / 1000) + " Mbps";
   overlay.hdr.textContent = selectedSession.hdr ? "On" : "Off";
 }
@@ -806,7 +856,12 @@ continueButton.addEventListener("click", hideStreamMenu);
 diagnosticsButton.addEventListener("click", toggleDiagnostics);
 stopButton.addEventListener("click", stopCurrentSession);
 resolutionSelect.addEventListener("change", function () {
-  bitrateSelect.value = resolutionSelect.value === "1920x1080" ? "20000" : "12000";
+  applySelectedVideoMode();
+});
+codecSelect.addEventListener("change", function () {
+  if (!updatingCodecOptions) {
+    codecSelectionWasIntentional = true;
+  }
 });
 
 function updateRemoteTracksForVisibility() {
@@ -1145,14 +1200,27 @@ async function updateStatistics() {
     const reports = await peerConnection.getStats();
     let inboundVideo = null;
     let inboundAudio = null;
+    const codecReports = {};
     reports.forEach(function (report) {
       const kind = typeof report.kind === "undefined" ? report.mediaType : report.kind;
       if (report.type === "inbound-rtp" && kind === "video" && !report.isRemote) {
         inboundVideo = report;
       } else if (report.type === "inbound-rtp" && kind === "audio" && !report.isRemote) {
         inboundAudio = report;
+      } else if (report.type === "codec" && report.id) {
+        codecReports[report.id] = report;
       }
     });
+
+    statistics.actualResolution.textContent = String(videoElement.videoWidth || 0)
+      + " × " + String(videoElement.videoHeight || 0);
+    if (selectedSession) {
+      statistics.requestedResolution.textContent = String(selectedSession.width)
+        + " × " + String(selectedSession.height);
+      statistics.requestedCodec.textContent = codecDisplayName(selectedSession.codec);
+      statistics.requestedBitrate.textContent = String(selectedSession.bitrateKbps / 1000)
+        + " Mbps";
+    }
 
     if (inboundVideo) {
       const framesDecoded = statisticValue(inboundVideo, "framesDecoded");
@@ -1165,6 +1233,11 @@ async function updateStatistics() {
       statistics.video.packetsReceived.textContent = statisticValue(inboundVideo, "packetsReceived");
       statistics.video.packetsLost.textContent = statisticValue(inboundVideo, "packetsLost");
       statistics.video.bytesReceived.textContent = statisticValue(inboundVideo, "bytesReceived");
+      const codecReport = inboundVideo.codecId ? codecReports[inboundVideo.codecId] : null;
+      const receivedCodec = codecReport && codecReport.mimeType
+        ? String(codecReport.mimeType)
+        : "-";
+      statistics.receivedCodec.textContent = receivedCodec;
       if (previousDecodedSample && sampleTime > previousDecodedSample.time) {
         const elapsedSeconds = (sampleTime - previousDecodedSample.time) / 1000;
         statistics.video.decodedFps.textContent = (
@@ -1172,6 +1245,31 @@ async function updateStatistics() {
         ).toFixed(1);
       }
       previousDecodedSample = { time: sampleTime, frames: framesDecoded };
+
+      if (sampleTime - lastStatisticsConsoleTime >= 5000) {
+        lastStatisticsConsoleTime = sampleTime;
+        console.log("Stream diagnostics: " + JSON.stringify({
+          requestedWidth: selectedSession ? selectedSession.width : 0,
+          requestedHeight: selectedSession ? selectedSession.height : 0,
+          requestedCodec: selectedSession ? selectedSession.codec : "unknown",
+          requestedBitrateKbps: selectedSession ? selectedSession.bitrateKbps : 0,
+          actualWidth: videoElement.videoWidth || 0,
+          actualHeight: videoElement.videoHeight || 0,
+          receivedCodec: receivedCodec,
+          decodedFps: statistics.video.decodedFps.textContent,
+          framesReceived: statisticValue(inboundVideo, "framesReceived"),
+          framesDecoded: framesDecoded,
+          framesDropped: statisticValue(inboundVideo, "framesDropped"),
+          packetsReceived: statisticValue(inboundVideo, "packetsReceived"),
+          packetsLost: statisticValue(inboundVideo, "packetsLost"),
+          bytesReceived: statisticValue(inboundVideo, "bytesReceived"),
+          audioPacketsReceived: inboundAudio
+            ? statisticValue(inboundAudio, "packetsReceived") : 0,
+          audioPacketsLost: inboundAudio ? statisticValue(inboundAudio, "packetsLost") : 0,
+          audioJitter: inboundAudio ? statisticValue(inboundAudio, "jitter") : 0,
+          gamepadConnected: activeGamepad() !== null,
+        }));
+      }
     }
 
     if (inboundAudio) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media/MediaSender.h"
+#include "session/StreamSettings.h"
 
 #include <Limelight.h>
 
@@ -30,7 +31,9 @@ class MoonlightMediaBridge {
 public:
     using Logger = std::function<void(const std::string&)>;
 
-    MoonlightMediaBridge(MediaSender& sender, Logger logger);
+    MoonlightMediaBridge(MediaSender& sender,
+                         StreamSettings settings,
+                         Logger logger);
     ~MoonlightMediaBridge();
 
     MoonlightMediaBridge(const MoonlightMediaBridge&) = delete;
@@ -75,6 +78,7 @@ private:
     static std::atomic<MoonlightMediaBridge*> activeAudioBridge_;
 
     MediaSender& sender_;
+    StreamSettings settings_;
     Logger logger_;
     DECODER_RENDERER_CALLBACKS videoCallbacks_{};
     AUDIO_RENDERER_CALLBACKS audioCallbacks_{};

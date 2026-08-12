@@ -13,20 +13,23 @@ namespace {
 struct SentFrame {
     std::vector<std::uint8_t> data;
     std::uint32_t rtpTimestamp;
+    gateway::VideoCodec codec;
 };
 
 class RecordingMediaSender final : public gateway::MediaSender {
 public:
-    void sendH264AccessUnit(std::span<const std::uint8_t> accessUnit,
-                            std::uint32_t rtpTimestamp) override
+    void sendVideoAccessUnit(gateway::VideoCodec codec,
+                             std::span<const std::uint8_t> accessUnit,
+                             std::uint32_t rtpTimestamp) override
     {
-        video.push_back({{accessUnit.begin(), accessUnit.end()}, rtpTimestamp});
+        video.push_back({{accessUnit.begin(), accessUnit.end()}, rtpTimestamp, codec});
     }
 
     void sendOpusPacket(std::span<const std::uint8_t> packet,
                         std::uint32_t rtpTimestamp) override
     {
-        audio.push_back({{packet.begin(), packet.end()}, rtpTimestamp});
+        audio.push_back(
+            {{packet.begin(), packet.end()}, rtpTimestamp, gateway::VideoCodec::H264});
     }
 
     std::vector<SentFrame> video;
@@ -47,9 +50,10 @@ int main()
     try {
         RecordingMediaSender sender;
         std::vector<std::string> logs;
-        gateway::MoonlightMediaBridge bridge(sender, [&logs](const std::string& message) {
-            logs.push_back(message);
-        });
+        gateway::MoonlightMediaBridge bridge(
+            sender,
+            gateway::defaultStreamSettings(),
+            [&logs](const std::string& message) { logs.push_back(message); });
 
         auto* videoCallbacks = bridge.videoCallbacks();
         require(videoCallbacks->setup(VIDEO_FORMAT_H265, 1280, 720, 60, &bridge, 0) != 0,
@@ -80,6 +84,8 @@ int main()
         require(sender.video.size() == 1, "IDR decode unit was not forwarded");
         require(sender.video[0].rtpTimestamp == idrUnit.rtpTimestamp,
                 "Moonlight video RTP timestamp changed");
+        require(sender.video[0].codec == gateway::VideoCodec::H264,
+                "H.264 decode unit used the wrong sender codec");
 
         std::vector<std::uint8_t> expectedIdr;
         expectedIdr.insert(expectedIdr.end(), sps.begin(), sps.end());
@@ -167,6 +173,91 @@ int main()
         audioCallbacks->cleanup();
         videoCallbacks->stop();
         videoCallbacks->cleanup();
+
+        RecordingMediaSender hevcSender;
+        auto hevcSettings = gateway::defaultStreamSettings(
+            1920, 1080, gateway::VideoCodec::HEVC);
+        gateway::MoonlightMediaBridge hevcBridge(
+            hevcSender,
+            hevcSettings,
+            [&logs](const std::string& message) { logs.push_back(message); });
+        auto* hevcVideoCallbacks = hevcBridge.videoCallbacks();
+        require(hevcVideoCallbacks->setup(
+                    VIDEO_FORMAT_H265_MAIN10, 1920, 1080, 60, &hevcBridge, 0)
+                    != 0,
+                "HEVC Main10 must be rejected for an HEVC Main session");
+        require(hevcVideoCallbacks->setup(
+                    VIDEO_FORMAT_H265, 1920, 1080, 60, &hevcBridge, 0)
+                    == 0,
+                "HEVC Main setup failed");
+        hevcVideoCallbacks->start();
+
+        std::array<char, 7> vps = {0, 0, 0, 1, 0x40, 0x01, 0x11};
+        std::array<char, 7> hevcSps = {0, 0, 0, 1, 0x42, 0x01, 0x22};
+        std::array<char, 7> hevcPps = {0, 0, 0, 1, 0x44, 0x01, 0x33};
+        std::array<char, 8> hevcIdr = {0, 0, 0, 1, 0x26, 0x01, 0x44, 0x55};
+        LENTRY hevcIdrEntry{
+            nullptr,
+            hevcIdr.data(),
+            static_cast<int>(hevcIdr.size()),
+            BUFFER_TYPE_PICDATA};
+        LENTRY hevcPpsEntry{
+            &hevcIdrEntry,
+            hevcPps.data(),
+            static_cast<int>(hevcPps.size()),
+            BUFFER_TYPE_PPS};
+        LENTRY hevcSpsEntry{
+            &hevcPpsEntry,
+            hevcSps.data(),
+            static_cast<int>(hevcSps.size()),
+            BUFFER_TYPE_SPS};
+        LENTRY vpsEntry{
+            &hevcSpsEntry,
+            vps.data(),
+            static_cast<int>(vps.size()),
+            BUFFER_TYPE_VPS};
+        DECODE_UNIT hevcIdrUnit{};
+        hevcIdrUnit.frameNumber = 100;
+        hevcIdrUnit.frameType = FRAME_TYPE_IDR;
+        hevcIdrUnit.rtpTimestamp = 90000;
+        hevcIdrUnit.fullLength = static_cast<int>(
+            vps.size() + hevcSps.size() + hevcPps.size() + hevcIdr.size());
+        hevcIdrUnit.bufferList = &vpsEntry;
+
+        require(hevcVideoCallbacks->submitDecodeUnit(&hevcIdrUnit) == DR_OK,
+                "HEVC access unit was rejected");
+        std::vector<std::uint8_t> expectedHevc;
+        expectedHevc.insert(expectedHevc.end(), vps.begin(), vps.end());
+        expectedHevc.insert(expectedHevc.end(), hevcSps.begin(), hevcSps.end());
+        expectedHevc.insert(expectedHevc.end(), hevcPps.begin(), hevcPps.end());
+        expectedHevc.insert(expectedHevc.end(), hevcIdr.begin(), hevcIdr.end());
+        require(hevcSender.video.size() == 1
+                    && hevcSender.video[0].data == expectedHevc
+                    && hevcSender.video[0].codec == gateway::VideoCodec::HEVC,
+                "HEVC VPS/SPS/PPS/IDR access unit was modified or misclassified");
+        require(hevcSender.video[0].rtpTimestamp == 90000,
+                "HEVC Moonlight RTP timestamp changed");
+
+        std::array<char, 7> hevcPframe = {0, 0, 0, 1, 0x02, 0x01, 0x66};
+        LENTRY hevcPframeEntry{nullptr,
+                               hevcPframe.data(),
+                               static_cast<int>(hevcPframe.size()),
+                               BUFFER_TYPE_PICDATA};
+        DECODE_UNIT hevcPframeUnit{};
+        hevcPframeUnit.frameNumber = 101;
+        hevcPframeUnit.frameType = FRAME_TYPE_PFRAME;
+        hevcPframeUnit.rtpTimestamp = 91500;
+        hevcPframeUnit.fullLength = static_cast<int>(hevcPframe.size());
+        hevcPframeUnit.bufferList = &hevcPframeEntry;
+        hevcBridge.onWebRtcKeyframeRequest();
+        require(hevcVideoCallbacks->submitDecodeUnit(&hevcPframeUnit) == DR_NEED_IDR,
+                "HEVC PLI did not produce one DR_NEED_IDR");
+        require(hevcVideoCallbacks->submitDecodeUnit(&hevcPframeUnit) == DR_OK,
+                "HEVC PLI produced more than one DR_NEED_IDR");
+        require(hevcVideoCallbacks->submitDecodeUnit(&hevcIdrUnit) == DR_OK,
+                "HEVC keyframe after PLI was rejected");
+        hevcVideoCallbacks->stop();
+        hevcVideoCallbacks->cleanup();
 
         std::cout << "Moonlight media bridge tests passed\n";
         return 0;

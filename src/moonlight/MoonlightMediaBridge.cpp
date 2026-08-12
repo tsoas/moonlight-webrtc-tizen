@@ -10,10 +10,16 @@ namespace gateway {
 std::atomic<MoonlightMediaBridge*> MoonlightMediaBridge::activeVideoBridge_ = nullptr;
 std::atomic<MoonlightMediaBridge*> MoonlightMediaBridge::activeAudioBridge_ = nullptr;
 
-MoonlightMediaBridge::MoonlightMediaBridge(MediaSender& sender, Logger logger)
+MoonlightMediaBridge::MoonlightMediaBridge(MediaSender& sender,
+                                           StreamSettings settings,
+                                           Logger logger)
     : sender_(sender)
+    , settings_(settings)
     , logger_(std::move(logger))
 {
+    if (const auto error = validateStreamSettings(settings_)) {
+        throw std::invalid_argument(*error);
+    }
     LiInitializeVideoCallbacks(&videoCallbacks_);
     videoCallbacks_.setup = &MoonlightMediaBridge::videoSetupCallback;
     videoCallbacks_.start = &MoonlightMediaBridge::videoStartCallback;
@@ -183,14 +189,34 @@ int MoonlightMediaBridge::setupVideo(int videoFormat,
                                       int redrawRate,
                                       int)
 {
+    const int expectedFormat = settings_.codec == VideoCodec::H264
+        ? VIDEO_FORMAT_H264
+        : VIDEO_FORMAT_H265;
+    const auto actualCodecName = videoFormat == VIDEO_FORMAT_H264
+        ? "H.264 High"
+        : videoFormat == VIDEO_FORMAT_H265
+        ? "HEVC Main"
+        : videoFormat == VIDEO_FORMAT_H265_MAIN10
+        ? "HEVC Main10"
+        : videoFormat == VIDEO_FORMAT_H265_REXT8_444
+        ? "HEVC RExt 8-bit 4:4:4"
+        : videoFormat == VIDEO_FORMAT_H265_REXT10_444
+        ? "HEVC RExt 10-bit 4:4:4"
+        : "unexpected";
     std::ostringstream message;
     message << "Moonlight video setup: " << width << 'x' << height << " @ " << redrawRate
-            << ", format=" << videoFormat;
+            << ", codec=" << actualCodecName;
     log(message.str());
 
-    if (videoFormat != VIDEO_FORMAT_H264) {
+    if (videoFormat != expectedFormat) {
         log("Unsupported Moonlight video format: " + std::to_string(videoFormat)
-            + " (only H.264 is supported)");
+            + " (requested " + std::string(videoCodecDisplayName(settings_.codec)) + ")");
+        videoConfigured_.store(false, std::memory_order_release);
+        return -1;
+    }
+    if (width != settings_.width || height != settings_.height
+        || redrawRate != settings_.fps) {
+        log("Moonlight video dimensions do not match the requested stream settings");
         videoConfigured_.store(false, std::memory_order_release);
         return -1;
     }
@@ -212,7 +238,7 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
         return DR_NEED_IDR;
     }
 
-    sender_.sendH264AccessUnit(*flattened, decodeUnit->rtpTimestamp);
+    sender_.sendVideoAccessUnit(settings_.codec, *flattened, decodeUnit->rtpTimestamp);
 
     if (decodeUnit->frameType == FRAME_TYPE_IDR
         && waitingForMoonlightIdr_.exchange(false, std::memory_order_acq_rel)) {

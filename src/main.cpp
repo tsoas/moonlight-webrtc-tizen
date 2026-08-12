@@ -373,6 +373,15 @@ private:
                         currentSession->requestStreamingStop();
                         return;
                     }
+                    if (!gateway::hasExpectedVideoCodec(
+                            sdp, settings.codec, VideoPayloadType)) {
+                        log("WebRTC SDP video codec validation failed");
+                        sendSessionStatus(currentSession,
+                                          "error",
+                                          "WebRTC SDP does not contain the requested video codec");
+                        currentSession->requestStreamingStop();
+                        return;
+                    }
                     if (!hasDataChannelApplicationSection(sdp)) {
                         log("WebRTC data-channel SDP validation failed");
                         sendSessionStatus(currentSession,
@@ -485,8 +494,13 @@ private:
         });
 
         rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
-        video.addH264Codec(VideoPayloadType);
-        video.addAttribute(gateway::samsungGameModeImageAttribute(settings));
+        if (settings.codec == gateway::VideoCodec::HEVC) {
+            video.addH265Codec(VideoPayloadType);
+        } else {
+            video.addH264Codec(VideoPayloadType);
+        }
+        video.addAttribute(
+            gateway::samsungGameModeImageAttribute(settings, VideoPayloadType));
         video.addSSRC(VideoSsrc, RtpCname, MediaStreamId, "video");
 
         session->videoTrack = peerConnection->addTrack(video);
@@ -495,10 +509,10 @@ private:
             VideoSsrc,
             RtpCname,
             VideoPayloadType,
-            rtc::H264RtpPacketizer::ClockRate);
+            VideoRtpClockRate);
         session->videoRtpStartTimestamp = rtpConfiguration->startTimestamp;
-        auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
-            rtc::NalUnit::Separator::StartSequence, rtpConfiguration);
+        auto packetizer = gateway::makeVideoRtpPacketizer(
+            settings.codec, rtpConfiguration);
         packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtpConfiguration));
         packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
         packetizer->addToChain(std::make_shared<rtc::PliHandler>(
@@ -508,7 +522,7 @@ private:
                 const auto requestNumber = currentSession->keyframeRequestCount.fetch_add(
                                                1, std::memory_order_relaxed)
                     + 1;
-                log("RTCP PLI/FIR received: H.264 IDR requested (#"
+                log("RTCP PLI/FIR received: keyframe requested (#"
                     + std::to_string(requestNumber) + ")");
 
                 if (sourceMode_ == MediaSourceMode::Moonlight) {
@@ -588,7 +602,7 @@ private:
         });
 
         session->mediaSender = std::make_shared<gateway::WebRtcMediaSender>(
-            session->videoTrack, session->audioTrack);
+            session->videoTrack, session->audioTrack, settings.codec);
 
         session->streamingThread = std::thread([this, weakSession, sessionId] {
             if (const auto currentSession = weakSession.lock();
@@ -736,7 +750,8 @@ private:
                         + static_cast<std::uint32_t>(
                             (videoFramesSent * VideoRtpClockRate)
                             / static_cast<std::uint64_t>(VideoFrameRate));
-                    session.mediaSender->sendH264AccessUnit(accessUnit, rtpTimestamp);
+                    session.mediaSender->sendVideoAccessUnit(
+                        gateway::VideoCodec::H264, accessUnit, rtpTimestamp);
 
                     ++videoFramesSent;
                     videoBytesSent += accessUnit.size();
@@ -908,6 +923,15 @@ private:
         const std::shared_ptr<Session>& session,
         const gateway::protocol::StartSessionRequest& request)
     {
+        if (sourceMode_ == MediaSourceMode::Test
+            && request.settings.codec != gateway::VideoCodec::H264) {
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         "start-session",
+                         "unsupported-test-source",
+                         "The built-in test source contains H.264 media only"));
+            return;
+        }
         {
             const std::lock_guard lock(session->streamMutex);
             if (session->sessionId != 0 || session->peerConnection) {
@@ -1106,6 +1130,7 @@ private:
             return;
         }
 
+        log("Incoming SDP answer:\n" + sdp);
         peerConnection->setRemoteDescription(rtc::Description(sdp, "answer"));
 
         std::vector<PendingCandidate> pendingCandidates;

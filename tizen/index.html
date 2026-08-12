@@ -395,8 +395,11 @@
         <span class="setting-label">Frame rate</span>
         <span class="fixed-value">60 FPS</span>
 
-        <span class="setting-label">Codec</span>
-        <span class="fixed-value">H.264</span>
+        <label for="codec-select">Codec</label>
+        <select id="codec-select" class="focusable">
+          <option value="h264">H.264</option>
+          <option value="hevc">HEVC (H.265)</option>
+        </select>
 
         <span class="setting-label">HDR</span>
         <span class="fixed-value">Off</span>
@@ -461,6 +464,11 @@
     </dl>
     <h2>Media</h2>
     <dl>
+      <div><dt>Requested resolution</dt><dd id="requested-resolution">-</dd></div>
+      <div><dt>Requested codec</dt><dd id="requested-codec">-</dd></div>
+      <div><dt>Requested bitrate</dt><dd id="requested-bitrate">-</dd></div>
+      <div><dt>Actual resolution</dt><dd id="actual-resolution">0 × 0</dd></div>
+      <div><dt>Received codec</dt><dd id="received-codec">-</dd></div>
       <div><dt>Remote tracks</dt><dd id="remote-tracks">0</dd></div>
       <div><dt>Video tracks</dt><dd id="video-tracks">0</dd></div>
       <div><dt>Audio tracks</dt><dd id="audio-tracks">0</dd></div>

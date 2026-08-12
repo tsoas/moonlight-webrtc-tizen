@@ -13,9 +13,21 @@ Opening the WebSocket does not start Sunshine or WebRTC. The Gateway first sends
 {"version":1,"type":"gateway-status","gatewayName":"Moonlight WebRTC Gateway","sunshineDetected":true,"sunshinePaired":true,"sessionActive":false}
 ```
 
-It also sends `capabilities`. Version 1 advertises only 1280x720 and 1920x1080, 60 fps,
-H.264, HDR off, stereo 48 kHz, and bitrates 10000, 12000, 15000, 20000, 25000, or
-30000 kbps.
+It also sends `capabilities`. Protocol version 1 advertises explicit `videoModes` so the
+TV never has to infer a resolution/codec combination. Each mode contains `width`,
+`height`, `fps`, `codecs`, `defaultCodec`, `defaultBitrateKbps`, and `experimental`.
+
+| Mode | Codecs | Default | Default bitrate | Experimental |
+| --- | --- | --- | ---: | --- |
+| 1280x720 @ 60 | H.264, HEVC | H.264 | 12000 kbps | No |
+| 1920x1080 @ 60 | H.264, HEVC | H.264 | 20000 kbps | No |
+| 2560x1440 @ 60 | H.264, HEVC | HEVC | 30000 kbps | Yes |
+| 3840x2160 @ 60 | HEVC | HEVC | 50000 kbps | No |
+
+The selectable bitrates are 10000, 12000, 15000, 20000, 25000, 30000, 40000, and
+50000 kbps. HDR remains off, audio remains stereo Opus at 48 kHz, and frame rate remains
+fixed at 60 fps. The 1440p mode is experimental because Samsung does not list it in the
+official Cloud Gaming resolution table.
 
 ## Applications
 
@@ -39,18 +51,20 @@ Gateway response (entries come directly from Sunshine):
   "type": "start-session",
   "appId": "0",
   "video": {
-    "width": 1920,
-    "height": 1080,
+    "width": 3840,
+    "height": 2160,
     "fps": 60,
-    "codec": "h264",
-    "bitrateKbps": 20000,
+    "codec": "hevc",
+    "bitrateKbps": 50000,
     "hdr": false
   },
   "audio": {"channels": 2}
 }
 ```
 
-The Gateway validates every field and rejects unsupported settings. Status transitions use
+`codec` is exactly `"h264"` or `"hevc"`. HEVC means Main Profile 8-bit SDR; Main10,
+HDR, Rec.2020, AV1, and silent codec fallback are not part of protocol version 1. The
+Gateway validates every field and rejects unsupported settings. Status transitions use
 `session-status` with one of `idle`, `starting`, `connecting-sunshine`,
 `starting-moonlight`, `starting-webrtc`, `streaming`, `stopping`, or `error`.
 

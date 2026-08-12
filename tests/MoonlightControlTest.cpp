@@ -74,6 +74,10 @@ int main()
 
         const auto settings720 = gateway::defaultStreamSettings();
         const auto settings1080 = gateway::defaultStreamSettings(1920, 1080);
+        const auto settingsHevc1080 = gateway::defaultStreamSettings(
+            1920, 1080, gateway::VideoCodec::HEVC);
+        const auto settingsHevc1440 = gateway::defaultStreamSettings(2560, 1440);
+        const auto settingsHevc4k = gateway::defaultStreamSettings(3840, 2160);
         const auto streamConfiguration =
             gateway::moonlight::MoonlightSession::createStreamConfiguration(settings720);
         require(streamConfiguration.width == 1280 && streamConfiguration.height == 720
@@ -97,6 +101,42 @@ int main()
                     && streamConfiguration1080.audioConfiguration
                         == AUDIO_CONFIGURATION_STEREO,
                 "1080p STREAM_CONFIGURATION values are incorrect");
+
+        for (const auto& settings : {settingsHevc1080, settingsHevc1440, settingsHevc4k}) {
+            const auto hevcConfiguration =
+                gateway::moonlight::MoonlightSession::createStreamConfiguration(settings);
+            require(hevcConfiguration.width == settings.width
+                        && hevcConfiguration.height == settings.height
+                        && hevcConfiguration.fps == 60
+                        && hevcConfiguration.bitrate == settings.bitrateKbps
+                        && hevcConfiguration.supportedVideoFormats == VIDEO_FORMAT_H265
+                        && hevcConfiguration.supportedVideoFormats
+                            != VIDEO_FORMAT_H265_MAIN10
+                        && (hevcConfiguration.supportedVideoFormats
+                            & VIDEO_FORMAT_MASK_10BIT)
+                            == 0
+                        && hevcConfiguration.colorSpace == COLORSPACE_REC_709
+                        && hevcConfiguration.colorRange == COLOR_RANGE_LIMITED,
+                    "HEVC Main 8-bit SDR STREAM_CONFIGURATION values are incorrect");
+            const auto launchQueryHevc =
+                gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
+                    7,
+                    hevcConfiguration,
+                    gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled);
+            const auto sopsHevc = std::find_if(
+                launchQueryHevc.begin(), launchQueryHevc.end(), [](const auto& item) {
+                    return item.first == "sops";
+                });
+            require(sopsHevc != launchQueryHevc.end() && sopsHevc->second == "0",
+                    "Sunshine sops=0 changed for an HEVC/high-resolution session");
+        }
+        require(gateway::moonlight::MoonlightSession::moonlightVideoFormat(
+                    gateway::VideoCodec::HEVC)
+                    == VIDEO_FORMAT_H265
+                    && gateway::moonlight::MoonlightSession::moonlightVideoFormat(
+                           gateway::VideoCodec::HEVC)
+                        != VIDEO_FORMAT_H265_MAIN10,
+                "HEVC did not map exclusively to VIDEO_FORMAT_H265");
 
         const auto launchQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
             7,

@@ -206,7 +206,7 @@ STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
     configuration.packetSize = 1392;
     configuration.streamingRemotely = STREAM_CFG_LOCAL;
     configuration.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    configuration.supportedVideoFormats = VIDEO_FORMAT_H264;
+    configuration.supportedVideoFormats = moonlightVideoFormat(settings.codec);
     configuration.clientRefreshRateX100 = 6000;
     configuration.colorSpace = COLORSPACE_REC_709;
     configuration.colorRange = COLOR_RANGE_LIMITED;
@@ -222,6 +222,17 @@ STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
         throw std::runtime_error("OpenSSL failed to generate Moonlight session keys");
     }
     return configuration;
+}
+
+int MoonlightSession::moonlightVideoFormat(VideoCodec codec)
+{
+    switch (codec) {
+    case VideoCodec::H264:
+        return VIDEO_FORMAT_H264;
+    case VideoCodec::HEVC:
+        return VIDEO_FORMAT_H265;
+    }
+    throw std::invalid_argument("Unsupported Moonlight video codec");
 }
 
 void MoonlightSession::start()
@@ -264,6 +275,18 @@ void MoonlightSession::start()
         }
 
         streamConfiguration_ = createStreamConfiguration(options_.settings);
+        if (options_.settings.codec == VideoCodec::HEVC) {
+            log("Requested Moonlight video: HEVC Main 8-bit, "
+                + std::to_string(options_.settings.width) + "x"
+                + std::to_string(options_.settings.height) + " @ "
+                + std::to_string(options_.settings.fps) + ", SDR Rec.709");
+        } else {
+            log("Requested Moonlight video: H.264 High 8-bit, "
+                + std::to_string(options_.settings.width) + "x"
+                + std::to_string(options_.settings.height) + " @ "
+                + std::to_string(options_.settings.fps) + ", SDR Rec.709");
+        }
+        log("Stream HDR: DISABLED");
         log("Host game optimizations: DISABLED");
         const std::string rtspSessionUrl = httpClient->launchOrResume(
             verb,
@@ -276,7 +299,8 @@ void MoonlightSession::start()
 
         serverInformation_ = std::make_unique<ServerInformationStorage>(
             detected.serverInfo, detected.address, rtspSessionUrl);
-        mediaBridge_ = std::make_unique<MoonlightMediaBridge>(sender_, logger_);
+        mediaBridge_ = std::make_unique<MoonlightMediaBridge>(
+            sender_, options_.settings, logger_);
 
         activeSession_.store(this, std::memory_order_release);
         const int result = LiStartConnection(serverInformation_->get(),
@@ -382,6 +406,15 @@ void MoonlightSession::connectionStatusCallback(int status)
     }
 }
 
+void MoonlightSession::setHdrModeCallback(bool hdrEnabled)
+{
+    if (auto* session = activeSession_.load(std::memory_order_acquire)) {
+        session->log(std::string("Host HDR state: ")
+                     + (hdrEnabled ? "ENABLED" : "DISABLED"));
+        session->log("Stream HDR: DISABLED");
+    }
+}
+
 void MoonlightSession::configureConnectionCallbacks()
 {
     LiInitializeConnectionCallbacks(&connectionCallbacks_);
@@ -393,6 +426,7 @@ void MoonlightSession::configureConnectionCallbacks()
         &MoonlightSession::connectionTerminatedCallback;
     connectionCallbacks_.logMessage = &MoonlightSession::logMessageCallback;
     connectionCallbacks_.connectionStatusUpdate = &MoonlightSession::connectionStatusCallback;
+    connectionCallbacks_.setHdrMode = &MoonlightSession::setHdrModeCallback;
 }
 
 void MoonlightSession::log(const std::string& message) const

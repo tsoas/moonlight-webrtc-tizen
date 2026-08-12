@@ -72,6 +72,7 @@ public:
                                            const std::optional<std::string>& requestedHost,
                                            const Logger& logger);
     static STREAM_CONFIGURATION createStreamConfiguration(const StreamSettings& settings);
+    static int moonlightVideoFormat(VideoCodec codec);
 
     // Sunshine uses SOPS as permission to change the host display mode. Stream
     // dimensions select encoder output only and must never alter Windows display state.
@@ -96,6 +97,7 @@ private:
     static void connectionTerminatedCallback(int errorCode);
     static void logMessageCallback(const char* format, ...);
     static void connectionStatusCallback(int status);
+    static void setHdrModeCallback(bool hdrEnabled);
 
     void configureConnectionCallbacks();
     void log(const std::string& message) const;

@@ -77,6 +77,25 @@ Json settingsJson(const StreamSettings& settings)
     };
 }
 
+Json videoModeJson(const VideoMode& mode)
+{
+    Json codecs = Json::array();
+    for (const auto codec : supportedVideoCodecs()) {
+        if (videoModeSupportsCodec(mode, codec)) {
+            codecs.push_back(videoCodecName(codec));
+        }
+    }
+    return {
+        {"width", mode.width},
+        {"height", mode.height},
+        {"fps", mode.fps},
+        {"codecs", std::move(codecs)},
+        {"defaultCodec", videoCodecName(mode.defaultCodec)},
+        {"defaultBitrateKbps", mode.defaultBitrateKbps},
+        {"experimental", mode.experimental},
+    };
+}
+
 } // namespace
 
 ProtocolError::ProtocolError(std::string code, std::string message)
@@ -150,19 +169,28 @@ Json makeGatewayStatus(const GatewayStatus& status)
 Json makeCapabilities()
 {
     auto message = envelope("capabilities");
+    message["videoModes"] = Json::array();
+    message["resolutions"] = Json::array();
+    for (const auto& mode : SupportedVideoModes) {
+        message["videoModes"].push_back(videoModeJson(mode));
+        message["resolutions"].push_back({
+            {"width", mode.width},
+            {"height", mode.height},
+            {"experimental", mode.experimental},
+        });
+    }
     message.update({
-        {"resolutions",
-         {{{"width", 1280}, {"height", 720}},
-          {{"width", 1920}, {"height", 1080}}}},
         {"frameRates", {60}},
-        {"codecs", {"h264"}},
+        {"codecs", {"h264", "hevc"}},
         {"hdr", false},
         {"audio", "stereo"},
         {"audioSampleRate", 48000},
         {"bitratesKbps", SupportedBitratesKbps},
         {"defaults",
          {{"720p60", 12000},
-          {"1080p60", 20000}}},
+          {"1080p60", 20000},
+          {"1440p60", 30000},
+          {"2160p60", 50000}}},
     });
     return message;
 }
