@@ -43,7 +43,19 @@ target_compile_features(gateway_protocol PUBLIC cxx_std_20)
 target_include_directories(gateway_protocol PUBLIC src)
 target_link_libraries(gateway_protocol PUBLIC nlohmann_json::nlohmann_json)
 
+add_library(moonlight_video_profile
+    src/moonlight/MoonlightVideoProfile.cpp
+)
+
+target_compile_features(moonlight_video_profile PUBLIC cxx_std_20)
+target_include_directories(moonlight_video_profile PUBLIC src)
+target_link_libraries(moonlight_video_profile PUBLIC
+    gateway_protocol
+    moonlight-common-c
+)
+
 add_library(moonlight_media_bridge
+    src/media/HevcSpsParser.cpp
     src/moonlight/MoonlightMediaBridge.cpp
 )
 
@@ -52,6 +64,7 @@ target_include_directories(moonlight_media_bridge PUBLIC src)
 target_link_libraries(moonlight_media_bridge PUBLIC
     gateway_protocol
     moonlight-common-c
+    moonlight_video_profile
 )
 
 add_library(moonlight_input_bridge
@@ -66,10 +79,12 @@ target_link_libraries(moonlight_input_bridge PUBLIC
 )
 
 add_library(moonlight_control
+    src/moonlight/HdrMetadata.cpp
     src/moonlight/control/MoonlightIdentity.cpp
     src/moonlight/control/MoonlightPairing.cpp
     src/moonlight/control/MoonlightSession.cpp
     src/moonlight/control/SunshineHttpClient.cpp
+    src/platform/WindowsDisplayState.cpp
 )
 
 target_compile_features(moonlight_control PUBLIC cxx_std_20)
@@ -78,11 +93,13 @@ target_link_libraries(moonlight_control PUBLIC
     gateway_protocol
     moonlight-common-c
     moonlight_media_bridge
+    moonlight_video_profile
     CURL::libcurl
     nlohmann_json::nlohmann_json
     OpenSSL::Crypto
     OpenSSL::SSL
     pugixml::pugixml
+    user32
     ws2_32
 )
 

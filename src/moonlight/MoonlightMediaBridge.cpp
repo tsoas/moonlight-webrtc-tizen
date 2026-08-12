@@ -1,5 +1,8 @@
 #include "moonlight/MoonlightMediaBridge.h"
 
+#include "media/HevcSpsParser.h"
+#include "moonlight/MoonlightVideoProfile.h"
+
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
@@ -12,10 +15,12 @@ std::atomic<MoonlightMediaBridge*> MoonlightMediaBridge::activeAudioBridge_ = nu
 
 MoonlightMediaBridge::MoonlightMediaBridge(MediaSender& sender,
                                            StreamSettings settings,
-                                           Logger logger)
+                                           Logger logger,
+                                           ValidationFailureHandler validationFailureHandler)
     : sender_(sender)
     , settings_(settings)
     , logger_(std::move(logger))
+    , validationFailureHandler_(std::move(validationFailureHandler))
 {
     if (const auto error = validateStreamSettings(settings_)) {
         throw std::invalid_argument(*error);
@@ -92,6 +97,8 @@ void MoonlightMediaBridge::videoStartCallback()
         bridge->videoStarted_.store(true, std::memory_order_release);
         const std::lock_guard lock(bridge->diagnosticsMutex_);
         bridge->nextVideoLog_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        bridge->hdrValidationDeadline_ =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
     }
 }
 
@@ -189,9 +196,8 @@ int MoonlightMediaBridge::setupVideo(int videoFormat,
                                       int redrawRate,
                                       int)
 {
-    const int expectedFormat = settings_.codec == VideoCodec::H264
-        ? VIDEO_FORMAT_H264
-        : VIDEO_FORMAT_H265;
+    const auto requestedProfile = moonlight::moonlightVideoProfile(settings_);
+    const int expectedFormat = requestedProfile.videoFormat;
     const auto actualCodecName = videoFormat == VIDEO_FORMAT_H264
         ? "H.264 High"
         : videoFormat == VIDEO_FORMAT_H265
@@ -205,12 +211,12 @@ int MoonlightMediaBridge::setupVideo(int videoFormat,
         : "unexpected";
     std::ostringstream message;
     message << "Moonlight video setup: " << width << 'x' << height << " @ " << redrawRate
-            << ", codec=" << actualCodecName;
+            << ", codec=" << actualCodecName << ", format=" << videoFormat;
     log(message.str());
 
     if (videoFormat != expectedFormat) {
         log("Unsupported Moonlight video format: " + std::to_string(videoFormat)
-            + " (requested " + std::string(videoCodecDisplayName(settings_.codec)) + ")");
+            + " (requested " + std::string(requestedProfile.name) + ")");
         videoConfigured_.store(false, std::memory_order_release);
         return -1;
     }
@@ -238,6 +244,73 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
         return DR_NEED_IDR;
     }
 
+    if (!firstVideoFrameLogged_.exchange(true, std::memory_order_acq_rel)) {
+        std::ostringstream message;
+        message << "First Moonlight DECODE_UNIT: hdrActive="
+                << (decodeUnit->hdrActive ? "true" : "false")
+                << ", colorSpace=" << static_cast<int>(decodeUnit->colorspace)
+                << (decodeUnit->colorspace == COLORSPACE_REC_2020 ? " (Rec.2020)" : "")
+                << ", frameType=" << decodeUnit->frameType
+                << ", RTP=" << decodeUnit->rtpTimestamp;
+        log(message.str());
+    }
+
+    if (settings_.hdr && !hdrValidationFailed_.load(std::memory_order_acquire)) {
+        if (decodeUnit->hdrActive) {
+            observedHdrActive_.store(true, std::memory_order_release);
+        }
+        if (decodeUnit->colorspace == COLORSPACE_REC_2020) {
+            observedRec2020_.store(true, std::memory_order_release);
+        }
+
+        if (!main10Verified_.load(std::memory_order_acquire)) {
+            if (const auto sps = parseHevcSps(*flattened)) {
+                bitDepthLuma_.store(sps->bitDepthLuma, std::memory_order_release);
+                bitDepthChroma_.store(sps->bitDepthChroma, std::memory_order_release);
+                chromaFormatIdc_.store(sps->chromaFormatIdc, std::memory_order_release);
+                std::ostringstream message;
+                message << "HEVC SPS: profile_idc=" << sps->profileIdc
+                        << ", Main10-compatible="
+                        << (sps->main10CompatibleProfile ? "yes" : "no")
+                        << ", chroma_format_idc=" << sps->chromaFormatIdc
+                        << ", bit_depth_luma=" << sps->bitDepthLuma
+                        << ", bit_depth_chroma=" << sps->bitDepthChroma;
+                log(message.str());
+                if (!sps->isMain10_420()) {
+                    failHdrValidation(
+                        "HDR HEVC SPS is not Main10 10-bit 4:2:0 compatible");
+                } else {
+                    main10Verified_.store(true, std::memory_order_release);
+                    log("HEVC bit depth: 10");
+                }
+            }
+        }
+
+        if (observedHdrActive_.load(std::memory_order_acquire)
+            && observedRec2020_.load(std::memory_order_acquire)
+            && main10Verified_.load(std::memory_order_acquire)
+            && !hdrValidationComplete_.exchange(true, std::memory_order_acq_rel)) {
+            log("Moonlight HDR validation passed: Main10 4:2:0, hdrActive=true, Rec.2020");
+        }
+
+        std::chrono::steady_clock::time_point deadline;
+        {
+            const std::lock_guard lock(diagnosticsMutex_);
+            deadline = hdrValidationDeadline_;
+        }
+        if (!hdrValidationComplete_.load(std::memory_order_acquire)
+            && deadline != std::chrono::steady_clock::time_point{}
+            && std::chrono::steady_clock::now() >= deadline) {
+            std::ostringstream reason;
+            reason << "HDR validation timed out (hdrActive="
+                   << (observedHdrActive_.load() ? "true" : "false")
+                   << ", Rec.2020=" << (observedRec2020_.load() ? "true" : "false")
+                   << ", Main10 SPS=" << (main10Verified_.load() ? "true" : "false")
+                   << ')';
+            failHdrValidation(reason.str());
+        }
+    }
+
     sender_.sendVideoAccessUnit(settings_.codec, *flattened, decodeUnit->rtpTimestamp);
 
     if (decodeUnit->frameType == FRAME_TYPE_IDR
@@ -260,6 +333,18 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
             decodeUnit->receiveTimeUs,
             decodeUnit->enqueueTimeUs,
             flattened->size(),
+            decodeUnit->hdrActive,
+            static_cast<int>(decodeUnit->colorspace),
+            main10Verified_.load(std::memory_order_acquire),
+            bitDepthLuma_.load(std::memory_order_acquire) > 0
+                ? std::optional<int>(bitDepthLuma_.load(std::memory_order_acquire))
+                : std::nullopt,
+            bitDepthChroma_.load(std::memory_order_acquire) > 0
+                ? std::optional<int>(bitDepthChroma_.load(std::memory_order_acquire))
+                : std::nullopt,
+            chromaFormatIdc_.load(std::memory_order_acquire) >= 0
+                ? std::optional<int>(chromaFormatIdc_.load(std::memory_order_acquire))
+                : std::nullopt,
         };
         if (now >= nextVideoLog_) {
             nextVideoLog_ = now + std::chrono::seconds(1);
@@ -370,6 +455,17 @@ std::optional<std::vector<std::uint8_t>> MoonlightMediaBridge::flattenDecodeUnit
     }
 
     return flattened;
+}
+
+void MoonlightMediaBridge::failHdrValidation(const std::string& message)
+{
+    if (hdrValidationFailed_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    log("Moonlight HDR validation failed: " + message);
+    if (validationFailureHandler_) {
+        validationFailureHandler_(message);
+    }
 }
 
 void MoonlightMediaBridge::log(const std::string& message)

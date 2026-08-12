@@ -93,6 +93,8 @@ Json videoModeJson(const VideoMode& mode)
         {"defaultCodec", videoCodecName(mode.defaultCodec)},
         {"defaultBitrateKbps", mode.defaultBitrateKbps},
         {"experimental", mode.experimental},
+        {"hdrSupported", mode.supportsHdr},
+        {"hdrExperimental", mode.supportsHdr},
     };
 }
 
@@ -182,7 +184,7 @@ Json makeCapabilities()
     message.update({
         {"frameRates", {60}},
         {"codecs", {"h264", "hevc"}},
-        {"hdr", false},
+        {"hdr", true},
         {"audio", "stereo"},
         {"audioSampleRate", 48000},
         {"bitratesKbps", SupportedBitratesKbps},

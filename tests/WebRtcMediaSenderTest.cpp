@@ -45,6 +45,20 @@ int main()
         require(h264Configuration->clockRate == 90000
                     && hevcConfiguration->clockRate == 90000,
                 "Video RTP clock is not 90000 Hz");
+        require(hevcConfiguration->colorSpaceId == 0,
+                "RTP color-space extension was enabled before negotiation");
+        gateway::configureHdrRtpColorSpace(hevcConfiguration, 9);
+        require(hevcConfiguration->colorSpaceId == 9
+                    && hevcConfiguration->colorRange == 1
+                    && hevcConfiguration->colorPrimaries == 9
+                    && hevcConfiguration->colorTransfer == 16
+                    && hevcConfiguration->colorMatrix == 9
+                    && hevcConfiguration->colorChromaSitingHorz == 0
+                    && hevcConfiguration->colorChromaSitingVert == 0,
+                "Negotiated BT.2020/PQ limited-range RTP values are incorrect");
+        gateway::disableRtpColorSpace(hevcConfiguration);
+        require(hevcConfiguration->colorSpaceId == 0,
+                "RTP color-space extension was not disabled");
 
         rtc::Description::Video h264Description(
             "video", rtc::Description::Direction::SendOnly);
@@ -56,11 +70,27 @@ int main()
         rtc::Description::Video hevcDescription(
             "video", rtc::Description::Direction::SendOnly);
         hevcDescription.addH265Codec(96);
+        hevcDescription.addExtMap(rtc::Description::Entry::ExtMap(
+            gateway::PreferredWebRtcColorSpaceExtensionId,
+            std::string(gateway::WebRtcColorSpaceExtensionUri)));
         const std::string hevcSdp = hevcDescription.generateSdp();
         require(hevcSdp.find("a=rtpmap:96 H265/90000") != std::string::npos
                     && hevcSdp.find("a=fmtp:96") == std::string::npos
-                    && hevcSdp.find("H264/90000") == std::string::npos,
+                    && hevcSdp.find("H264/90000") == std::string::npos
+                    && hevcSdp.find(
+                           "a=extmap:9 http://www.webrtc.org/experiments/rtp-hdrext/color-space")
+                        != std::string::npos,
                 "libdatachannel HEVC SDP description is incorrect");
+
+        rtc::Description::Video main10Description(
+            "video", rtc::Description::Direction::SendOnly);
+        main10Description.addH265Codec(
+            96, "profile-id=2;tier-flag=0;level-id=123");
+        const std::string main10Sdp = main10Description.generateSdp();
+        require(main10Sdp.find(
+                    "a=fmtp:96 profile-id=2;tier-flag=0;level-id=123")
+                    != std::string::npos,
+                "libdatachannel did not generate the HEVC Main10 fmtp line");
 
         std::cout << "WebRTC media sender tests passed\n";
         return 0;

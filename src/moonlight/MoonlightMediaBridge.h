@@ -25,15 +25,23 @@ struct MoonlightVideoDiagnostics {
     std::uint64_t receiveTimeUs;
     std::uint64_t enqueueTimeUs;
     std::size_t bytes;
+    bool hdrActive;
+    int colorSpace;
+    bool main10Verified;
+    std::optional<int> bitDepthLuma;
+    std::optional<int> bitDepthChroma;
+    std::optional<int> chromaFormatIdc;
 };
 
 class MoonlightMediaBridge {
 public:
     using Logger = std::function<void(const std::string&)>;
+    using ValidationFailureHandler = std::function<void(const std::string&)>;
 
     MoonlightMediaBridge(MediaSender& sender,
                          StreamSettings settings,
-                         Logger logger);
+                         Logger logger,
+                         ValidationFailureHandler validationFailureHandler = {});
     ~MoonlightMediaBridge();
 
     MoonlightMediaBridge(const MoonlightMediaBridge&) = delete;
@@ -72,6 +80,7 @@ private:
     int setupAudio(const POPUS_MULTISTREAM_CONFIGURATION opusConfig, int arFlags);
     void submitAudio(char* sampleData, int sampleLength);
     std::optional<std::vector<std::uint8_t>> flattenDecodeUnit(PDECODE_UNIT decodeUnit);
+    void failHdrValidation(const std::string& message);
     void log(const std::string& message);
 
     static std::atomic<MoonlightMediaBridge*> activeVideoBridge_;
@@ -80,6 +89,7 @@ private:
     MediaSender& sender_;
     StreamSettings settings_;
     Logger logger_;
+    ValidationFailureHandler validationFailureHandler_;
     DECODER_RENDERER_CALLBACKS videoCallbacks_{};
     AUDIO_RENDERER_CALLBACKS audioCallbacks_{};
 
@@ -95,11 +105,21 @@ private:
     std::atomic<std::uint64_t> videoBytes_ = 0;
     std::atomic<std::uint64_t> audioPackets_ = 0;
     std::atomic<std::uint64_t> audioBytes_ = 0;
+    std::atomic<bool> firstVideoFrameLogged_ = false;
+    std::atomic<bool> observedHdrActive_ = false;
+    std::atomic<bool> observedRec2020_ = false;
+    std::atomic<bool> main10Verified_ = false;
+    std::atomic<bool> hdrValidationComplete_ = false;
+    std::atomic<bool> hdrValidationFailed_ = false;
+    std::atomic<int> bitDepthLuma_ = 0;
+    std::atomic<int> bitDepthChroma_ = 0;
+    std::atomic<int> chromaFormatIdc_ = -1;
 
     mutable std::mutex diagnosticsMutex_;
     std::optional<MoonlightVideoDiagnostics> lastVideoFrame_;
     std::chrono::steady_clock::time_point nextVideoLog_{};
     std::chrono::steady_clock::time_point nextAudioLog_{};
+    std::chrono::steady_clock::time_point hdrValidationDeadline_{};
     std::mutex logMutex_;
 };
 

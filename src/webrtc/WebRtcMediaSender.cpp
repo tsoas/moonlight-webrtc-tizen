@@ -49,6 +49,36 @@ std::shared_ptr<rtc::RtpPacketizer> makeVideoRtpPacketizer(
     throw std::invalid_argument("Unsupported WebRTC video codec");
 }
 
+void configureHdrRtpColorSpace(
+    const std::shared_ptr<rtc::RtpPacketizationConfig>& rtpConfiguration,
+    int negotiatedExtensionId)
+{
+    if (!rtpConfiguration) {
+        throw std::invalid_argument("Video RTP configuration must not be null");
+    }
+    if (negotiatedExtensionId <= 0 || negotiatedExtensionId > 14) {
+        throw std::invalid_argument(
+            "Color-space RTP extension requires a negotiated one-byte extension ID");
+    }
+    rtpConfiguration->colorSpaceId =
+        static_cast<std::uint8_t>(negotiatedExtensionId);
+    rtpConfiguration->colorChromaSitingHorz = 0;
+    rtpConfiguration->colorChromaSitingVert = 0;
+    rtpConfiguration->colorRange = 1;
+    rtpConfiguration->colorPrimaries = 9;
+    rtpConfiguration->colorTransfer = 16;
+    rtpConfiguration->colorMatrix = 9;
+}
+
+void disableRtpColorSpace(
+    const std::shared_ptr<rtc::RtpPacketizationConfig>& rtpConfiguration)
+{
+    if (!rtpConfiguration) {
+        throw std::invalid_argument("Video RTP configuration must not be null");
+    }
+    rtpConfiguration->colorSpaceId = 0;
+}
+
 void WebRtcMediaSender::sendOpusPacket(std::span<const std::uint8_t> packet,
                                        std::uint32_t rtpTimestamp)
 {

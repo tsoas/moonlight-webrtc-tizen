@@ -1,6 +1,9 @@
 #include "moonlight/control/MoonlightSession.h"
 
+#include "moonlight/HdrMetadata.h"
+#include "moonlight/MoonlightVideoProfile.h"
 #include "moonlight/control/SunshineHttpClient.h"
+#include "platform/WindowsDisplayState.h"
 
 #include <algorithm>
 #include <array>
@@ -193,9 +196,7 @@ DetectedSunshine MoonlightSession::detectSunshine(
 STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
     const StreamSettings& settings)
 {
-    if (const auto error = validateStreamSettings(settings)) {
-        throw std::invalid_argument(*error);
-    }
+    const auto profile = moonlightVideoProfile(settings);
 
     STREAM_CONFIGURATION configuration;
     LiInitializeStreamConfiguration(&configuration);
@@ -206,10 +207,10 @@ STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
     configuration.packetSize = 1392;
     configuration.streamingRemotely = STREAM_CFG_LOCAL;
     configuration.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    configuration.supportedVideoFormats = moonlightVideoFormat(settings.codec);
+    configuration.supportedVideoFormats = profile.videoFormat;
     configuration.clientRefreshRateX100 = 6000;
-    configuration.colorSpace = COLORSPACE_REC_709;
-    configuration.colorRange = COLOR_RANGE_LIMITED;
+    configuration.colorSpace = profile.colorSpace;
+    configuration.colorRange = profile.colorRange;
     configuration.encryptionFlags = ENCFLG_ALL;
 
     if (RAND_bytes(
@@ -224,17 +225,6 @@ STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
     return configuration;
 }
 
-int MoonlightSession::moonlightVideoFormat(VideoCodec codec)
-{
-    switch (codec) {
-    case VideoCodec::H264:
-        return VIDEO_FORMAT_H264;
-    case VideoCodec::HEVC:
-        return VIDEO_FORMAT_H265;
-    }
-    throw std::invalid_argument("Unsupported Moonlight video codec");
-}
-
 void MoonlightSession::start()
 {
     State expected = State::Idle;
@@ -247,6 +237,27 @@ void MoonlightSession::start()
         if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
             throw std::runtime_error(
                 "Moonlight client is not paired; run with --source=moonlight --pair first");
+        }
+
+        const auto hostDisplay = platform::primaryWindowsDisplayState();
+        if (hostDisplay) {
+            log("Host display before session: "
+                + platform::formatWindowsDisplayState(*hostDisplay));
+            log(std::string("Host HDR state before session: ")
+                + (hostDisplay->hdrEnabled ? "ENABLED" : "DISABLED"));
+        } else {
+            log("Host display before session: unavailable");
+            log("Host HDR state before session: unavailable");
+        }
+        if (options_.settings.hdr
+            && (!hostDisplay || !hostDisplay->hdrSupported || !hostDisplay->hdrEnabled)) {
+            throw std::runtime_error(
+                "HDR session rejected: Windows HDR must already be enabled on the primary display");
+        }
+        if (options_.settings.hdr
+            && (detected.serverInfo.serverCodecModeSupport & SCM_HEVC_MAIN10) == 0) {
+            throw std::runtime_error(
+                "HDR session rejected: Sunshine does not advertise HEVC Main10 support");
         }
 
         auto httpClient = configuredClient(identity_, detected);
@@ -274,19 +285,15 @@ void MoonlightSession::start()
             verb = "resume";
         }
 
+        const auto profile = moonlightVideoProfile(options_.settings);
         streamConfiguration_ = createStreamConfiguration(options_.settings);
-        if (options_.settings.codec == VideoCodec::HEVC) {
-            log("Requested Moonlight video: HEVC Main 8-bit, "
-                + std::to_string(options_.settings.width) + "x"
-                + std::to_string(options_.settings.height) + " @ "
-                + std::to_string(options_.settings.fps) + ", SDR Rec.709");
-        } else {
-            log("Requested Moonlight video: H.264 High 8-bit, "
-                + std::to_string(options_.settings.width) + "x"
-                + std::to_string(options_.settings.height) + " @ "
-                + std::to_string(options_.settings.fps) + ", SDR Rec.709");
-        }
-        log("Stream HDR: DISABLED");
+        log("Requested Moonlight video: " + std::string(profile.name) + ", "
+            + std::to_string(options_.settings.width) + "x"
+            + std::to_string(options_.settings.height) + " @ "
+            + std::to_string(options_.settings.fps) + ", "
+            + (profile.hdr ? "HDR, Rec.2020" : "SDR, Rec.709"));
+        log(std::string("Requested stream HDR: ")
+            + (options_.settings.hdr ? "ENABLED" : "DISABLED"));
         log("Host game optimizations: DISABLED");
         const std::string rtspSessionUrl = httpClient->launchOrResume(
             verb,
@@ -300,7 +307,15 @@ void MoonlightSession::start()
         serverInformation_ = std::make_unique<ServerInformationStorage>(
             detected.serverInfo, detected.address, rtspSessionUrl);
         mediaBridge_ = std::make_unique<MoonlightMediaBridge>(
-            sender_, options_.settings, logger_);
+            sender_,
+            options_.settings,
+            logger_,
+            [this](const std::string& error) {
+                log("Stopping invalid HDR stream: " + error);
+                if (terminationHandler_) {
+                    terminationHandler_();
+                }
+            });
 
         activeSession_.store(this, std::memory_order_release);
         const int result = LiStartConnection(serverInformation_->get(),
@@ -324,6 +339,17 @@ void MoonlightSession::start()
             throw std::runtime_error("Moonlight connection startup was interrupted");
         }
         log("LiStartConnection succeeded");
+        log(std::string("LiGetCurrentHostDisplayHdrMode(): ")
+            + (LiGetCurrentHostDisplayHdrMode() ? "ENABLED" : "DISABLED"));
+        if (const auto displayDuringSession = platform::primaryWindowsDisplayState()) {
+            log("Host display during session: "
+                + platform::formatWindowsDisplayState(*displayDuringSession));
+        } else {
+            log("Host display during session: unavailable");
+        }
+        if (options_.settings.hdr && LiGetCurrentHostDisplayHdrMode()) {
+            logHdrMetadata();
+        }
     } catch (...) {
         State starting = State::Starting;
         state_.compare_exchange_strong(starting, State::Stopped);
@@ -409,9 +435,15 @@ void MoonlightSession::connectionStatusCallback(int status)
 void MoonlightSession::setHdrModeCallback(bool hdrEnabled)
 {
     if (auto* session = activeSession_.load(std::memory_order_acquire)) {
-        session->log(std::string("Host HDR state: ")
+        session->log(std::string("Moonlight host HDR mode: ")
                      + (hdrEnabled ? "ENABLED" : "DISABLED"));
-        session->log("Stream HDR: DISABLED");
+        session->log(std::string("LiGetCurrentHostDisplayHdrMode(): ")
+                     + (LiGetCurrentHostDisplayHdrMode() ? "ENABLED" : "DISABLED"));
+        session->log(std::string("Requested stream HDR: ")
+                     + (session->options_.settings.hdr ? "ENABLED" : "DISABLED"));
+        if (hdrEnabled && session->options_.settings.hdr) {
+            session->logHdrMetadata();
+        }
     }
 }
 
@@ -427,6 +459,16 @@ void MoonlightSession::configureConnectionCallbacks()
     connectionCallbacks_.logMessage = &MoonlightSession::logMessageCallback;
     connectionCallbacks_.connectionStatusUpdate = &MoonlightSession::connectionStatusCallback;
     connectionCallbacks_.setHdrMode = &MoonlightSession::setHdrModeCallback;
+}
+
+void MoonlightSession::logHdrMetadata() const
+{
+    SS_HDR_METADATA raw{};
+    if (!LiGetHdrMetadata(&raw)) {
+        log("HDR metadata: unavailable");
+        return;
+    }
+    log(formatHdrMetadata(convertHdrMetadata(raw)));
 }
 
 void MoonlightSession::log(const std::string& message) const

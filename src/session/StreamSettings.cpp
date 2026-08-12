@@ -35,6 +35,11 @@ bool videoModeSupportsCodec(const VideoMode& mode, VideoCodec codec)
     return false;
 }
 
+bool videoModeSupportsHdr(const VideoMode& mode, VideoCodec codec)
+{
+    return mode.supportsHdr && codec == VideoCodec::HEVC;
+}
+
 std::span<const VideoCodec> supportedVideoCodecs()
 {
     return AllVideoCodecs;
@@ -69,8 +74,8 @@ std::optional<std::string> validateStreamSettings(const StreamSettings& settings
     if (!videoModeSupportsCodec(*mode, settings.codec)) {
         return "Unsupported resolution and codec combination";
     }
-    if (settings.hdr) {
-        return "HDR streaming is not supported";
+    if (settings.hdr && !videoModeSupportsHdr(*mode, settings.codec)) {
+        return "HDR is supported only with HEVC at 1080p60 or 4K60";
     }
     if (settings.audioChannels != 2) {
         return "Only stereo audio is supported";

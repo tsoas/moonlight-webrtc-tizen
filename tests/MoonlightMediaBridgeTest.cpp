@@ -1,11 +1,14 @@
+#include "media/HevcSpsParser.h"
 #include "moonlight/MoonlightMediaBridge.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iostream>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -41,6 +44,75 @@ void require(bool condition, const std::string& message)
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+class BitWriter {
+public:
+    void writeBits(std::uint64_t value, int count)
+    {
+        for (int bit = count - 1; bit >= 0; --bit) {
+            if (bitOffset_ == 0) {
+                bytes_.push_back(0);
+            }
+            bytes_.back() |= static_cast<std::uint8_t>(
+                ((value >> bit) & 1U) << (7 - bitOffset_));
+            bitOffset_ = (bitOffset_ + 1) % 8;
+        }
+    }
+
+    void writeUnsignedExpGolomb(std::uint32_t value)
+    {
+        const std::uint32_t code = value + 1;
+        int bitCount = 0;
+        for (auto current = code; current != 0; current >>= 1) {
+            ++bitCount;
+        }
+        writeBits(0, bitCount - 1);
+        writeBits(code, bitCount);
+    }
+
+    std::vector<std::uint8_t> take()
+    {
+        return std::move(bytes_);
+    }
+
+private:
+    std::vector<std::uint8_t> bytes_;
+    int bitOffset_ = 0;
+};
+
+std::vector<std::uint8_t> syntheticMain10Sps()
+{
+    BitWriter writer;
+    writer.writeBits(0, 4);
+    writer.writeBits(0, 3);
+    writer.writeBits(1, 1);
+    writer.writeBits(0, 2);
+    writer.writeBits(0, 1);
+    writer.writeBits(2, 5);
+    writer.writeBits(0, 32);
+    writer.writeBits(0, 48);
+    writer.writeBits(120, 8);
+    writer.writeUnsignedExpGolomb(0);
+    writer.writeUnsignedExpGolomb(1);
+    writer.writeUnsignedExpGolomb(1920);
+    writer.writeUnsignedExpGolomb(1080);
+    writer.writeBits(0, 1);
+    writer.writeUnsignedExpGolomb(2);
+    writer.writeUnsignedExpGolomb(2);
+
+    const auto rbsp = writer.take();
+    std::vector<std::uint8_t> nal{0, 0, 0, 1, 0x42, 0x01};
+    int zeroCount = 0;
+    for (const auto byte : rbsp) {
+        if (zeroCount >= 2 && byte <= 3) {
+            nal.push_back(3);
+            zeroCount = 0;
+        }
+        nal.push_back(byte);
+        zeroCount = byte == 0 ? zeroCount + 1 : 0;
+    }
+    return nal;
 }
 
 } // namespace
@@ -258,6 +330,95 @@ int main()
                 "HEVC keyframe after PLI was rejected");
         hevcVideoCallbacks->stop();
         hevcVideoCallbacks->cleanup();
+
+        RecordingMediaSender hdrSender;
+        auto hdrSettings = hevcSettings;
+        hdrSettings.hdr = true;
+        bool hdrValidationFailed = false;
+        gateway::MoonlightMediaBridge hdrBridge(
+            hdrSender,
+            hdrSettings,
+            [&logs](const std::string& message) { logs.push_back(message); },
+            [&hdrValidationFailed](const std::string&) {
+                hdrValidationFailed = true;
+            });
+        auto* hdrCallbacks = hdrBridge.videoCallbacks();
+        require(hdrCallbacks->setup(
+                    VIDEO_FORMAT_H265, 1920, 1080, 60, &hdrBridge, 0)
+                    != 0,
+                "HEVC Main must be rejected for an HDR session");
+        require(hdrCallbacks->setup(
+                    VIDEO_FORMAT_H265_MAIN10, 1920, 1080, 60, &hdrBridge, 0)
+                    == 0,
+                "HEVC Main10 HDR setup failed");
+        hdrCallbacks->start();
+
+        std::vector<std::uint8_t> hdrVps{0, 0, 0, 1, 0x40, 0x01, 0x11};
+        auto hdrSps = syntheticMain10Sps();
+        std::vector<std::uint8_t> hdrPps{0, 0, 0, 1, 0x44, 0x01, 0x22};
+        std::vector<std::uint8_t> hdrSei{0, 0, 0, 1, 0x4e, 0x01, 0x33, 0x80};
+        std::vector<std::uint8_t> hdrIdr{0, 0, 0, 1, 0x26, 0x01, 0x44, 0x55};
+
+        const auto parsedSps = gateway::parseHevcSps(hdrSps);
+        require(parsedSps && parsedSps->isMain10_420()
+                    && parsedSps->profileIdc == 2
+                    && parsedSps->bitDepthLuma == 10
+                    && parsedSps->bitDepthChroma == 10,
+                "Synthetic HEVC Main10 SPS parser test failed");
+
+        LENTRY hdrIdrEntry{nullptr,
+                           reinterpret_cast<char*>(hdrIdr.data()),
+                           static_cast<int>(hdrIdr.size()),
+                           BUFFER_TYPE_PICDATA};
+        LENTRY hdrSeiEntry{&hdrIdrEntry,
+                           reinterpret_cast<char*>(hdrSei.data()),
+                           static_cast<int>(hdrSei.size()),
+                           BUFFER_TYPE_PICDATA};
+        LENTRY hdrPpsEntry{&hdrSeiEntry,
+                           reinterpret_cast<char*>(hdrPps.data()),
+                           static_cast<int>(hdrPps.size()),
+                           BUFFER_TYPE_PPS};
+        LENTRY hdrSpsEntry{&hdrPpsEntry,
+                           reinterpret_cast<char*>(hdrSps.data()),
+                           static_cast<int>(hdrSps.size()),
+                           BUFFER_TYPE_SPS};
+        LENTRY hdrVpsEntry{&hdrSpsEntry,
+                           reinterpret_cast<char*>(hdrVps.data()),
+                           static_cast<int>(hdrVps.size()),
+                           BUFFER_TYPE_VPS};
+        DECODE_UNIT hdrUnit{};
+        hdrUnit.frameNumber = 200;
+        hdrUnit.frameType = FRAME_TYPE_IDR;
+        hdrUnit.rtpTimestamp = 180000;
+        hdrUnit.hdrActive = true;
+        hdrUnit.colorspace = COLORSPACE_REC_2020;
+        hdrUnit.fullLength = static_cast<int>(hdrVps.size() + hdrSps.size()
+            + hdrPps.size() + hdrSei.size() + hdrIdr.size());
+        hdrUnit.bufferList = &hdrVpsEntry;
+
+        require(hdrCallbacks->submitDecodeUnit(&hdrUnit) == DR_OK,
+                "Valid HEVC Main10 HDR access unit was rejected");
+        std::vector<std::uint8_t> expectedHdr;
+        for (const auto* part : {&hdrVps, &hdrSps, &hdrPps, &hdrSei, &hdrIdr}) {
+            expectedHdr.insert(expectedHdr.end(), part->begin(), part->end());
+        }
+        require(hdrSender.video.size() == 1
+                    && hdrSender.video[0].data == expectedHdr
+                    && hdrSender.video[0].rtpTimestamp == 180000,
+                "HDR VPS/SPS/PPS/SEI/IDR or Moonlight timestamp was modified");
+        const auto hdrDiagnostics = hdrBridge.lastVideoFrame();
+        require(hdrDiagnostics && hdrDiagnostics->hdrActive
+                    && hdrDiagnostics->colorSpace == COLORSPACE_REC_2020
+                    && hdrDiagnostics->main10Verified
+                    && hdrDiagnostics->bitDepthLuma == 10
+                    && hdrDiagnostics->bitDepthChroma == 10
+                    && hdrDiagnostics->chromaFormatIdc == 1
+                    && !hdrValidationFailed,
+                "HDR DECODE_UNIT diagnostics were not propagated");
+        require(std::ranges::find(logs, "HEVC bit depth: 10") != logs.end(),
+                "Verified HEVC bit depth diagnostic was not logged");
+        hdrCallbacks->stop();
+        hdrCallbacks->cleanup();
 
         std::cout << "Moonlight media bridge tests passed\n";
         return 0;

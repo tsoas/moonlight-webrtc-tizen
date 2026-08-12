@@ -15,6 +15,7 @@ const streamMenu = document.getElementById("stream-menu");
 const appSelect = document.getElementById("app-select");
 const resolutionSelect = document.getElementById("resolution-select");
 const codecSelect = document.getElementById("codec-select");
+const hdrSelect = document.getElementById("hdr-select");
 const bitrateSelect = document.getElementById("bitrate-select");
 const playButton = document.getElementById("play-button");
 const continueButton = document.getElementById("continue-button");
@@ -47,9 +48,14 @@ const trackCounts = {
 const statistics = {
   requestedResolution: document.getElementById("requested-resolution"),
   requestedCodec: document.getElementById("requested-codec"),
+  requestedHdr: document.getElementById("requested-hdr"),
   requestedBitrate: document.getElementById("requested-bitrate"),
   actualResolution: document.getElementById("actual-resolution"),
   receivedCodec: document.getElementById("received-codec"),
+  receivedColorSpace: document.getElementById("received-color-space"),
+  receivedTransfer: document.getElementById("received-transfer"),
+  receivedBitDepth: document.getElementById("received-bit-depth"),
+  receivedHdr: document.getElementById("received-hdr"),
   video: {
     framesReceived: document.getElementById("frames-received"),
     framesDecoded: document.getElementById("frames-decoded"),
@@ -327,6 +333,25 @@ function codecDisplayName(codec) {
   return codec === "hevc" ? "HEVC (H.265)" : "H.264";
 }
 
+function updateHdrOptions(mode) {
+  const hdrWasEnabled = hdrSelect.value === "true";
+  const supportsHdr = Boolean(mode && mode.hdrSupported);
+  hdrSelect.innerHTML = "";
+  const offOption = document.createElement("option");
+  offOption.value = "false";
+  offOption.textContent = "Off";
+  hdrSelect.appendChild(offOption);
+  if (supportsHdr) {
+    const onOption = document.createElement("option");
+    onOption.value = "true";
+    onOption.textContent = mode.hdrExperimental ? "On — Experimental" : "On";
+    hdrSelect.appendChild(onOption);
+  }
+  hdrSelect.value = hdrWasEnabled && supportsHdr && codecSelect.value === "hevc"
+    ? "true"
+    : "false";
+}
+
 function applySelectedVideoMode() {
   const mode = selectedVideoMode();
   if (!mode || !Array.isArray(mode.codecs) || mode.codecs.length === 0) {
@@ -342,6 +367,7 @@ function applySelectedVideoMode() {
   });
   codecSelect.value = keepIntentionalCodec ? previousCodec : mode.defaultCodec;
   updatingCodecOptions = false;
+  updateHdrOptions(mode);
   bitrateSelect.value = String(mode.defaultBitrateKbps);
   if (mode.experimental) {
     setHomeMessage("2560 × 1440 is experimental on Samsung Tizen.", false);
@@ -448,7 +474,7 @@ function selectedSettings() {
     fps: 60,
     codec: codecSelect.value,
     bitrateKbps: Number(bitrateSelect.value),
-    hdr: false,
+    hdr: hdrSelect.value === "true",
   };
 }
 
@@ -862,6 +888,17 @@ codecSelect.addEventListener("change", function () {
   if (!updatingCodecOptions) {
     codecSelectionWasIntentional = true;
   }
+  if (codecSelect.value !== "hevc") {
+    hdrSelect.value = "false";
+  }
+  updateHdrOptions(selectedVideoMode());
+});
+hdrSelect.addEventListener("change", function () {
+  if (hdrSelect.value === "true" && codecSelect.value !== "hevc") {
+    codecSelect.value = "hevc";
+    codecSelectionWasIntentional = true;
+  }
+  updateHdrOptions(selectedVideoMode());
 });
 
 function updateRemoteTracksForVisibility() {
@@ -1192,6 +1229,28 @@ function statisticValue(report, name) {
   return typeof report[name] === "undefined" ? 0 : report[name];
 }
 
+function availableRuntimeValue(sources, names) {
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+    const source = sources[sourceIndex];
+    if (!source) {
+      continue;
+    }
+    for (let nameIndex = 0; nameIndex < names.length; nameIndex += 1) {
+      const value = source[names[nameIndex]];
+      if (typeof value !== "undefined" && value !== null && value !== "") {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function displayRuntimeValue(element, value) {
+  element.textContent = value === null
+    ? "unavailable"
+    : typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
 async function updateStatistics() {
   if (!peerConnection) {
     return;
@@ -1218,6 +1277,7 @@ async function updateStatistics() {
       statistics.requestedResolution.textContent = String(selectedSession.width)
         + " × " + String(selectedSession.height);
       statistics.requestedCodec.textContent = codecDisplayName(selectedSession.codec);
+      statistics.requestedHdr.textContent = selectedSession.hdr ? "On" : "Off";
       statistics.requestedBitrate.textContent = String(selectedSession.bitrateKbps / 1000)
         + " Mbps";
     }
@@ -1238,6 +1298,19 @@ async function updateStatistics() {
         ? String(codecReport.mimeType)
         : "-";
       statistics.receivedCodec.textContent = receivedCodec;
+      const videoTrack = remoteStream.getVideoTracks()[0] || null;
+      const videoSettings = videoTrack && typeof videoTrack.getSettings === "function"
+        ? videoTrack.getSettings()
+        : null;
+      const runtimeSources = [videoSettings, inboundVideo, codecReport];
+      displayRuntimeValue(statistics.receivedColorSpace, availableRuntimeValue(
+        runtimeSources, ["colorSpace", "colourSpace", "colorPrimaries"]));
+      displayRuntimeValue(statistics.receivedTransfer, availableRuntimeValue(
+        runtimeSources, ["transferCharacteristics", "transferFunction", "colorTransfer"]));
+      displayRuntimeValue(statistics.receivedBitDepth, availableRuntimeValue(
+        runtimeSources, ["bitDepth", "bitsPerComponent"]));
+      displayRuntimeValue(statistics.receivedHdr, availableRuntimeValue(
+        runtimeSources, ["hdr", "hdrMetadataType", "highDynamicRange"]));
       if (previousDecodedSample && sampleTime > previousDecodedSample.time) {
         const elapsedSeconds = (sampleTime - previousDecodedSample.time) / 1000;
         statistics.video.decodedFps.textContent = (
@@ -1252,10 +1325,15 @@ async function updateStatistics() {
           requestedWidth: selectedSession ? selectedSession.width : 0,
           requestedHeight: selectedSession ? selectedSession.height : 0,
           requestedCodec: selectedSession ? selectedSession.codec : "unknown",
+          requestedHdr: selectedSession ? selectedSession.hdr : false,
           requestedBitrateKbps: selectedSession ? selectedSession.bitrateKbps : 0,
           actualWidth: videoElement.videoWidth || 0,
           actualHeight: videoElement.videoHeight || 0,
           receivedCodec: receivedCodec,
+          runtimeColorSpace: statistics.receivedColorSpace.textContent,
+          runtimeTransfer: statistics.receivedTransfer.textContent,
+          runtimeBitDepth: statistics.receivedBitDepth.textContent,
+          runtimeHdr: statistics.receivedHdr.textContent,
           decodedFps: statistics.video.decodedFps.textContent,
           framesReceived: statisticValue(inboundVideo, "framesReceived"),
           framesDecoded: framesDecoded,

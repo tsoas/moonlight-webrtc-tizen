@@ -15,19 +15,21 @@ Opening the WebSocket does not start Sunshine or WebRTC. The Gateway first sends
 
 It also sends `capabilities`. Protocol version 1 advertises explicit `videoModes` so the
 TV never has to infer a resolution/codec combination. Each mode contains `width`,
-`height`, `fps`, `codecs`, `defaultCodec`, `defaultBitrateKbps`, and `experimental`.
+`height`, `fps`, `codecs`, `defaultCodec`, `defaultBitrateKbps`, `experimental`,
+`hdrSupported`, and `hdrExperimental`.
 
-| Mode | Codecs | Default | Default bitrate | Experimental |
-| --- | --- | --- | ---: | --- |
-| 1280x720 @ 60 | H.264, HEVC | H.264 | 12000 kbps | No |
-| 1920x1080 @ 60 | H.264, HEVC | H.264 | 20000 kbps | No |
-| 2560x1440 @ 60 | H.264, HEVC | HEVC | 30000 kbps | Yes |
-| 3840x2160 @ 60 | HEVC | HEVC | 50000 kbps | No |
+| Mode | Codecs | HDR | Default | Default bitrate | Experimental |
+| --- | --- | --- | --- | ---: | --- |
+| 1280x720 @ 60 | H.264, HEVC | Off | H.264 | 12000 kbps | No |
+| 1920x1080 @ 60 | H.264, HEVC | Off, On | H.264 | 20000 kbps | HDR only |
+| 2560x1440 @ 60 | H.264, HEVC | Off | HEVC | 30000 kbps | Yes |
+| 3840x2160 @ 60 | HEVC | Off, On | HEVC | 50000 kbps | HDR only |
 
 The selectable bitrates are 10000, 12000, 15000, 20000, 25000, 30000, 40000, and
-50000 kbps. HDR remains off, audio remains stereo Opus at 48 kHz, and frame rate remains
-fixed at 60 fps. The 1440p mode is experimental because Samsung does not list it in the
-official Cloud Gaming resolution table.
+50000 kbps. HDR defaults to off and is experimental when explicitly selected at 1080p
+or 4K with HEVC. Audio remains stereo Opus at 48 kHz and frame rate remains fixed at
+60 fps. The 1440p mode is experimental because Samsung does not list it in the official
+Cloud Gaming resolution table.
 
 ## Applications
 
@@ -56,17 +58,30 @@ Gateway response (entries come directly from Sunshine):
     "fps": 60,
     "codec": "hevc",
     "bitrateKbps": 50000,
-    "hdr": false
+    "hdr": true
   },
   "audio": {"channels": 2}
 }
 ```
 
-`codec` is exactly `"h264"` or `"hevc"`. HEVC means Main Profile 8-bit SDR; Main10,
-HDR, Rec.2020, AV1, and silent codec fallback are not part of protocol version 1. The
+`codec` is exactly `"h264"` or `"hevc"`. HEVC with `hdr: false` selects Main Profile
+8-bit SDR with Rec.709. HEVC with `hdr: true` selects Main10 HDR with Rec.2020 and is
+accepted only at 1920x1080 or 3840x2160. H.264 HDR, 720p HDR, and 1440p HDR are rejected.
+There is no silent codec or SDR fallback. AV1 is not part of protocol version 1. The
 Gateway validates every field and rejects unsupported settings. Status transitions use
 `session-status` with one of `idle`, `starting`, `connecting-sunshine`,
 `starting-moonlight`, `starting-webrtc`, `streaming`, `stopping`, or `error`.
+
+For HDR, the H.265 SDP format parameters explicitly request Main10 (`profile-id=2`),
+Main tier, and level 4.1 at 1080p60 or level 5.1 at 4K60. The Gateway rejects the session
+if the Tizen answer does not preserve that profile instead of sending Main10 under a
+Main 8-bit negotiation.
+
+The Gateway offers the standard WebRTC RTP color-space extension and records whether
+Tizen negotiates it. It intentionally does not transmit the extension on this Samsung
+runtime: physical validation showed zero decoded frames when the negotiated BT.2020/PQ
+extension bytes were present, while the identical Main10 stream decoded at 60 fps when
+relying on its HEVC VUI/SEI metadata. The encoded access units remain unchanged.
 
 Each started session receives a positive `sessionId`. WebRTC `offer`, `answer`, and
 `candidate` messages contain that ID so late signaling from a stopped session can be

@@ -401,8 +401,10 @@
           <option value="hevc">HEVC (H.265)</option>
         </select>
 
-        <span class="setting-label">HDR</span>
-        <span class="fixed-value">Off</span>
+        <label for="hdr-select">HDR</label>
+        <select id="hdr-select" class="focusable">
+          <option value="false">Off</option>
+        </select>
 
         <label for="bitrate-select">Bitrate</label>
         <select id="bitrate-select" class="focusable">
@@ -466,9 +468,14 @@
     <dl>
       <div><dt>Requested resolution</dt><dd id="requested-resolution">-</dd></div>
       <div><dt>Requested codec</dt><dd id="requested-codec">-</dd></div>
+      <div><dt>Requested HDR</dt><dd id="requested-hdr">Off</dd></div>
       <div><dt>Requested bitrate</dt><dd id="requested-bitrate">-</dd></div>
       <div><dt>Actual resolution</dt><dd id="actual-resolution">0 × 0</dd></div>
       <div><dt>Received codec</dt><dd id="received-codec">-</dd></div>
+      <div><dt>Color space</dt><dd id="received-color-space">unavailable</dd></div>
+      <div><dt>Transfer</dt><dd id="received-transfer">unavailable</dd></div>
+      <div><dt>Bit depth</dt><dd id="received-bit-depth">unavailable</dd></div>
+      <div><dt>HDR indication</dt><dd id="received-hdr">unavailable</dd></div>
       <div><dt>Remote tracks</dt><dd id="remote-tracks">0</dd></div>
       <div><dt>Video tracks</dt><dd id="video-tracks">0</dd></div>
       <div><dt>Audio tracks</dt><dd id="audio-tracks">0</dd></div>

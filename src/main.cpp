@@ -158,6 +158,7 @@ struct Session {
     std::shared_ptr<rtc::DataChannel> controlChannel;
     std::shared_ptr<rtc::DataChannel> gamepadChannel;
     std::shared_ptr<gateway::WebRtcMediaSender> mediaSender;
+    std::shared_ptr<rtc::RtpPacketizationConfig> videoRtpConfiguration;
     std::shared_ptr<gateway::moonlight::MoonlightSession> moonlightSession;
     std::shared_ptr<gateway::moonlight::MoonlightInputBridge> inputBridge;
     std::uint32_t videoRtpStartTimestamp = 0;
@@ -382,6 +383,15 @@ private:
                         currentSession->requestStreamingStop();
                         return;
                     }
+                    if (!gateway::hasExpectedHevcFormatParameters(
+                            sdp, settings, VideoPayloadType)) {
+                        log("WebRTC SDP HEVC Main10 fmtp validation failed");
+                        sendSessionStatus(currentSession,
+                                          "error",
+                                          "WebRTC SDP does not contain the requested HEVC Main10 profile");
+                        currentSession->requestStreamingStop();
+                        return;
+                    }
                     if (!hasDataChannelApplicationSection(sdp)) {
                         log("WebRTC data-channel SDP validation failed");
                         sendSessionStatus(currentSession,
@@ -495,12 +505,18 @@ private:
 
         rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
         if (settings.codec == gateway::VideoCodec::HEVC) {
-            video.addH265Codec(VideoPayloadType);
+            video.addH265Codec(
+                VideoPayloadType, gateway::hevcFormatParameters(settings));
         } else {
             video.addH264Codec(VideoPayloadType);
         }
         video.addAttribute(
             gateway::samsungGameModeImageAttribute(settings, VideoPayloadType));
+        if (settings.hdr) {
+            video.addExtMap(rtc::Description::Entry::ExtMap(
+                gateway::PreferredWebRtcColorSpaceExtensionId,
+                std::string(gateway::WebRtcColorSpaceExtensionUri)));
+        }
         video.addSSRC(VideoSsrc, RtpCname, MediaStreamId, "video");
 
         session->videoTrack = peerConnection->addTrack(video);
@@ -510,6 +526,7 @@ private:
             RtpCname,
             VideoPayloadType,
             VideoRtpClockRate);
+        session->videoRtpConfiguration = rtpConfiguration;
         session->videoRtpStartTimestamp = rtpConfiguration->startTimestamp;
         auto packetizer = gateway::makeVideoRtpPacketizer(
             settings.codec, rtpConfiguration);
@@ -984,7 +1001,8 @@ private:
             + std::to_string(request.settings.fps) + ", codec="
             + std::string(gateway::videoCodecName(request.settings.codec))
             + ", bitrate=" + std::to_string(request.settings.bitrateKbps)
-            + " kbps, HDR=OFF, audio=stereo 48000 Hz");
+            + " kbps, HDR=" + (request.settings.hdr ? "ON" : "OFF")
+            + ", audio=stereo 48000 Hz");
         {
             const std::lock_guard lock(session->streamMutex);
             session->sessionId = sessionId;
@@ -1131,6 +1149,42 @@ private:
         }
 
         log("Incoming SDP answer:\n" + sdp);
+        if (!gateway::hasExpectedHevcFormatParameters(
+                sdp, session->settings, VideoPayloadType)) {
+            log("Tizen rejected the requested HEVC Main10 SDP profile");
+            sendSessionStatus(session,
+                              "error",
+                              "Tizen did not negotiate HEVC Main10");
+            session->requestStreamingStop();
+            return;
+        }
+        if (session->settings.hdr) {
+            if (const auto levelId = gateway::hevcLevelId(sdp, VideoPayloadType)) {
+                log("Tizen HEVC Main10 answer level-id=" + std::to_string(*levelId));
+                const int offeredLevel = session->settings.width == 3840 ? 153 : 123;
+                if (*levelId < offeredLevel) {
+                    log("Tizen lowered the HEVC level-id from "
+                        + std::to_string(offeredLevel) + " to "
+                        + std::to_string(*levelId)
+                        + "; continuing with physical decoder validation");
+                }
+            } else {
+                log("Tizen HEVC Main10 answer level-id: unavailable");
+            }
+            const auto colorSpaceId = gateway::videoExtensionId(
+                sdp, gateway::WebRtcColorSpaceExtensionUri);
+            if (colorSpaceId) {
+                gateway::disableRtpColorSpace(session->videoRtpConfiguration);
+                log("WebRTC RTP HDR color-space extension: NEGOTIATED BUT DISABLED for Tizen decoder compatibility, id="
+                    + std::to_string(*colorSpaceId)
+                    + "; relying on HEVC VUI/SEI metadata");
+            } else {
+                gateway::disableRtpColorSpace(session->videoRtpConfiguration);
+                log("WebRTC RTP HDR color-space extension: NOT NEGOTIATED");
+            }
+        } else {
+            gateway::disableRtpColorSpace(session->videoRtpConfiguration);
+        }
         peerConnection->setRemoteDescription(rtc::Description(sdp, "answer"));
 
         std::vector<PendingCandidate> pendingCandidates;

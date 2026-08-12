@@ -1,3 +1,5 @@
+#include "moonlight/HdrMetadata.h"
+#include "moonlight/MoonlightVideoProfile.h"
 #include "moonlight/control/MoonlightIdentity.h"
 #include "moonlight/control/MoonlightPairing.h"
 #include "moonlight/control/MoonlightSession.h"
@@ -8,8 +10,11 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -78,6 +83,10 @@ int main()
             1920, 1080, gateway::VideoCodec::HEVC);
         const auto settingsHevc1440 = gateway::defaultStreamSettings(2560, 1440);
         const auto settingsHevc4k = gateway::defaultStreamSettings(3840, 2160);
+        auto settingsHdr1080 = settingsHevc1080;
+        settingsHdr1080.hdr = true;
+        auto settingsHdr4k = settingsHevc4k;
+        settingsHdr4k.hdr = true;
         const auto streamConfiguration =
             gateway::moonlight::MoonlightSession::createStreamConfiguration(settings720);
         require(streamConfiguration.width == 1280 && streamConfiguration.height == 720
@@ -130,13 +139,71 @@ int main()
             require(sopsHevc != launchQueryHevc.end() && sopsHevc->second == "0",
                     "Sunshine sops=0 changed for an HEVC/high-resolution session");
         }
-        require(gateway::moonlight::MoonlightSession::moonlightVideoFormat(
-                    gateway::VideoCodec::HEVC)
-                    == VIDEO_FORMAT_H265
-                    && gateway::moonlight::MoonlightSession::moonlightVideoFormat(
-                           gateway::VideoCodec::HEVC)
-                        != VIDEO_FORMAT_H265_MAIN10,
-                "HEVC did not map exclusively to VIDEO_FORMAT_H265");
+        const auto sdrProfile = gateway::moonlight::moonlightVideoProfile(settingsHevc1080);
+        const auto hdrProfile = gateway::moonlight::moonlightVideoProfile(settingsHdr1080);
+        require(sdrProfile.videoFormat == VIDEO_FORMAT_H265
+                    && sdrProfile.colorSpace == COLORSPACE_REC_709
+                    && !sdrProfile.hdr && sdrProfile.bitDepth == 8,
+                "HEVC SDR profile mapping is incorrect");
+        require(hdrProfile.videoFormat == VIDEO_FORMAT_H265_MAIN10
+                    && hdrProfile.videoFormat != VIDEO_FORMAT_H264
+                    && hdrProfile.colorSpace == COLORSPACE_REC_2020
+                    && hdrProfile.colorRange == COLOR_RANGE_LIMITED
+                    && hdrProfile.hdr && hdrProfile.bitDepth == 10,
+                "HEVC HDR profile mapping is incorrect");
+
+        for (const auto& hdrSettings : {settingsHdr1080, settingsHdr4k}) {
+            const auto hdrConfiguration =
+                gateway::moonlight::MoonlightSession::createStreamConfiguration(
+                    hdrSettings);
+            require(hdrConfiguration.supportedVideoFormats == VIDEO_FORMAT_H265_MAIN10
+                        && hdrConfiguration.colorSpace == COLORSPACE_REC_2020
+                        && hdrConfiguration.colorRange == COLOR_RANGE_LIMITED,
+                    "HDR STREAM_CONFIGURATION is not Main10 Rec.2020 limited range");
+
+            const auto hdrQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
+                7,
+                hdrConfiguration,
+                gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled);
+            const auto queryValue = [&hdrQuery](std::string_view key)
+                -> std::optional<std::string_view> {
+                const auto item = std::find_if(
+                    hdrQuery.begin(), hdrQuery.end(), [key](const auto& value) {
+                        return value.first == key;
+                    });
+                return item == hdrQuery.end()
+                    ? std::nullopt
+                    : std::optional<std::string_view>(item->second);
+            };
+            require(queryValue("sops") == "0"
+                        && queryValue("hdrMode") == "1"
+                        && queryValue("clientHdrCapVersion") == "0"
+                        && queryValue("clientHdrCapSupportedFlagsInUint32") == "0"
+                        && queryValue("clientHdrCapMetaDataId")
+                            == "NV_STATIC_METADATA_TYPE_1"
+                        && queryValue("clientHdrCapDisplayData")
+                            == "0x0x0x0x0x0x0x0x0x0x0",
+                    "Sunshine HDR launch parameters are incomplete or sops changed");
+        }
+
+        const auto sdrQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
+            7,
+            gateway::moonlight::MoonlightSession::createStreamConfiguration(
+                settingsHevc1080),
+            gateway::moonlight::MoonlightSession::HostGameOptimizationsEnabled);
+        require(std::ranges::none_of(sdrQuery, [](const auto& item) {
+                    return item.first.starts_with("hdr")
+                        || item.first.starts_with("clientHdr");
+                }),
+                "SDR launch unexpectedly contains HDR parameters");
+
+        const auto sdrAfterHdr = gateway::moonlight::moonlightVideoProfile(settingsHevc1080);
+        const auto hdrAfterSdr = gateway::moonlight::moonlightVideoProfile(settingsHdr1080);
+        require(sdrAfterHdr.videoFormat == VIDEO_FORMAT_H265
+                    && sdrAfterHdr.colorSpace == COLORSPACE_REC_709
+                    && hdrAfterSdr.videoFormat == VIDEO_FORMAT_H265_MAIN10
+                    && hdrAfterSdr.colorSpace == COLORSPACE_REC_2020,
+                "SDR/HDR profile selection leaked across sessions");
 
         const auto launchQuery = gateway::moonlight::SunshineHttpClient::makeLaunchQuery(
             7,
@@ -160,6 +227,31 @@ int main()
             });
         require(sops1080 != launchQuery1080.end() && sops1080->second == "0",
                 "Sunshine host game optimizations changed for 1080p");
+
+        SS_HDR_METADATA rawMetadata{};
+        rawMetadata.displayPrimaries[0] = {35400, 14600};
+        rawMetadata.displayPrimaries[1] = {8500, 39850};
+        rawMetadata.displayPrimaries[2] = {6550, 2300};
+        rawMetadata.whitePoint = {15635, 16450};
+        rawMetadata.maxDisplayLuminance = 1000;
+        rawMetadata.minDisplayLuminance = 50;
+        rawMetadata.maxContentLightLevel = 1200;
+        rawMetadata.maxFrameAverageLightLevel = 400;
+        const auto metadata = gateway::moonlight::convertHdrMetadata(rawMetadata);
+        require(metadata.displayPrimaries[0]
+                    && metadata.displayPrimaries[0]->x == 0.708
+                    && metadata.whitePoint
+                    && metadata.maxDisplayLuminanceNits == 1000.0
+                    && metadata.minDisplayLuminanceNits == 0.005
+                    && metadata.maxContentLightLevelNits == 1200.0
+                    && metadata.maxFrameAverageLightLevelNits == 400.0
+                    && !metadata.maxFullFrameLuminanceNits,
+                "HDR metadata conversion is incorrect");
+        const auto metadataText = gateway::moonlight::formatHdrMetadata(metadata);
+        require(metadataText.find("MaxCLL=1200") != std::string::npos
+                    && metadataText.find("maxFullFrame=unavailable")
+                        != std::string::npos,
+                "HDR metadata formatting fabricated or omitted values");
 
         const auto* desktopById =
             gateway::moonlight::SunshineHttpClient::findApplicationById(applications, 7);

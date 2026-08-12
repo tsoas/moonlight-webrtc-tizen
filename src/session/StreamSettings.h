@@ -22,6 +22,7 @@ struct VideoMode {
     VideoCodec defaultCodec;
     int defaultBitrateKbps;
     bool experimental;
+    bool supportsHdr;
 };
 
 struct StreamSettings {
@@ -37,10 +38,10 @@ struct StreamSettings {
 };
 
 inline constexpr std::array SupportedVideoModes{
-    VideoMode{1280, 720, 60, true, true, VideoCodec::H264, 12000, false},
-    VideoMode{1920, 1080, 60, true, true, VideoCodec::H264, 20000, false},
-    VideoMode{2560, 1440, 60, true, true, VideoCodec::HEVC, 30000, true},
-    VideoMode{3840, 2160, 60, false, true, VideoCodec::HEVC, 50000, false},
+    VideoMode{1280, 720, 60, true, true, VideoCodec::H264, 12000, false, false},
+    VideoMode{1920, 1080, 60, true, true, VideoCodec::H264, 20000, false, true},
+    VideoMode{2560, 1440, 60, true, true, VideoCodec::HEVC, 30000, true, false},
+    VideoMode{3840, 2160, 60, false, true, VideoCodec::HEVC, 50000, false, true},
 };
 
 inline constexpr std::array SupportedBitratesKbps{
@@ -56,6 +57,7 @@ inline constexpr std::array SupportedBitratesKbps{
 
 const VideoMode* findVideoMode(int width, int height, int fps = 60);
 bool videoModeSupportsCodec(const VideoMode& mode, VideoCodec codec);
+bool videoModeSupportsHdr(const VideoMode& mode, VideoCodec codec);
 std::span<const VideoCodec> supportedVideoCodecs();
 StreamSettings defaultStreamSettings(
     int width = 1280,

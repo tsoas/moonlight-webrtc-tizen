@@ -403,6 +403,13 @@ SunshineHttpClient::Query SunshineHttpClient::makeLaunchQuery(
         {"gcmap", "0"},
         {"gcpersist", "0"},
     };
+    if ((streamConfiguration.supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) != 0) {
+        query.emplace_back("hdrMode", "1");
+        query.emplace_back("clientHdrCapVersion", "0");
+        query.emplace_back("clientHdrCapSupportedFlagsInUint32", "0");
+        query.emplace_back("clientHdrCapMetaDataId", "NV_STATIC_METADATA_TYPE_1");
+        query.emplace_back("clientHdrCapDisplayData", "0x0x0x0x0x0x0x0x0x0x0");
+    }
     return query;
 }
 

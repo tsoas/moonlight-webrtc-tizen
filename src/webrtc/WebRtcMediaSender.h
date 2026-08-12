@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <memory>
+#include <string_view>
 
 namespace rtc {
 class RtpPacketizationConfig;
@@ -12,6 +13,10 @@ class Track;
 }
 
 namespace gateway {
+
+inline constexpr std::string_view WebRtcColorSpaceExtensionUri =
+    "http://www.webrtc.org/experiments/rtp-hdrext/color-space";
+inline constexpr int PreferredWebRtcColorSpaceExtensionId = 9;
 
 class WebRtcMediaSender final : public MediaSender {
 public:
@@ -33,6 +38,11 @@ private:
 
 std::shared_ptr<rtc::RtpPacketizer> makeVideoRtpPacketizer(
     VideoCodec codec,
+    const std::shared_ptr<rtc::RtpPacketizationConfig>& rtpConfiguration);
+void configureHdrRtpColorSpace(
+    const std::shared_ptr<rtc::RtpPacketizationConfig>& rtpConfiguration,
+    int negotiatedExtensionId);
+void disableRtpColorSpace(
     const std::shared_ptr<rtc::RtpPacketizationConfig>& rtpConfiguration);
 
 } // namespace gateway
