@@ -115,12 +115,16 @@ MoonlightSession::MoonlightSession(MediaSender& sender,
                                    MoonlightIdentity& identity,
                                    MoonlightSessionOptions options,
                                    Logger logger,
-                                   TerminationHandler terminationHandler)
+                                   TerminationHandler terminationHandler,
+                                   RumbleHandler rumbleHandler,
+                                   RumbleHandler triggerRumbleHandler)
     : sender_(sender)
     , identity_(identity)
     , options_(std::move(options))
     , logger_(std::move(logger))
     , terminationHandler_(std::move(terminationHandler))
+    , rumbleHandler_(std::move(rumbleHandler))
+    , triggerRumbleHandler_(std::move(triggerRumbleHandler))
 {
     configureConnectionCallbacks();
 }
@@ -447,6 +451,30 @@ void MoonlightSession::setHdrModeCallback(bool hdrEnabled)
     }
 }
 
+void MoonlightSession::rumbleCallback(unsigned short controllerNumber,
+                                      unsigned short lowFrequencyMotor,
+                                      unsigned short highFrequencyMotor)
+{
+    if (auto* session = activeSession_.load(std::memory_order_acquire)) {
+        if (session->rumbleHandler_) {
+            session->rumbleHandler_(controllerNumber, lowFrequencyMotor, highFrequencyMotor);
+        }
+    }
+}
+
+void MoonlightSession::rumbleTriggersCallback(std::uint16_t controllerNumber,
+                                              std::uint16_t leftTriggerMotor,
+                                              std::uint16_t rightTriggerMotor)
+{
+    if (auto* session = activeSession_.load(std::memory_order_acquire)) {
+        if (session->triggerRumbleHandler_) {
+            session->triggerRumbleHandler_(controllerNumber,
+                                           leftTriggerMotor,
+                                           rightTriggerMotor);
+        }
+    }
+}
+
 void MoonlightSession::configureConnectionCallbacks()
 {
     LiInitializeConnectionCallbacks(&connectionCallbacks_);
@@ -459,6 +487,8 @@ void MoonlightSession::configureConnectionCallbacks()
     connectionCallbacks_.logMessage = &MoonlightSession::logMessageCallback;
     connectionCallbacks_.connectionStatusUpdate = &MoonlightSession::connectionStatusCallback;
     connectionCallbacks_.setHdrMode = &MoonlightSession::setHdrModeCallback;
+    connectionCallbacks_.rumble = &MoonlightSession::rumbleCallback;
+    connectionCallbacks_.rumbleTriggers = &MoonlightSession::rumbleTriggersCallback;
 }
 
 void MoonlightSession::logHdrMetadata() const

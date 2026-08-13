@@ -424,7 +424,22 @@ private:
         });
 
         auto inputBridge = std::make_shared<gateway::moonlight::MoonlightInputBridge>(
-            [this](const std::string& message) { log(message); });
+            [this](const std::string& message) { log(message); },
+            [this, weakSession, sessionId](const std::string& message) {
+                const auto currentSession = weakSession.lock();
+                if (!currentSession || !isCurrentSession(currentSession, sessionId)) {
+                    return;
+                }
+                const auto controlChannel = currentSession->controlChannel;
+                if (!controlChannel || !controlChannel->isOpen()) {
+                    return;
+                }
+                try {
+                    controlChannel->send(message);
+                } catch (const std::exception&) {
+                    // The peer can close while a queued haptic message is dispatched.
+                }
+            });
         session->inputBridge = inputBridge;
 
         rtc::DataChannelInit controlChannelOptions;
@@ -664,6 +679,26 @@ private:
             [weakSession = std::weak_ptr<Session>(session)] {
                 if (const auto currentSession = weakSession.lock()) {
                     currentSession->requestStreamingStop();
+                }
+            },
+            [weakInputBridge = std::weak_ptr<gateway::moonlight::MoonlightInputBridge>(
+                 session->inputBridge)](std::uint16_t controllerNumber,
+                                        std::uint16_t lowFrequencyMotor,
+                                        std::uint16_t highFrequencyMotor) {
+                if (const auto inputBridge = weakInputBridge.lock()) {
+                    inputBridge->handleRumble(controllerNumber,
+                                               lowFrequencyMotor,
+                                               highFrequencyMotor);
+                }
+            },
+            [weakInputBridge = std::weak_ptr<gateway::moonlight::MoonlightInputBridge>(
+                 session->inputBridge)](std::uint16_t controllerNumber,
+                                        std::uint16_t leftTriggerMotor,
+                                        std::uint16_t rightTriggerMotor) {
+                if (const auto inputBridge = weakInputBridge.lock()) {
+                    inputBridge->handleTriggerRumble(controllerNumber,
+                                                      leftTriggerMotor,
+                                                      rightTriggerMotor);
                 }
             });
         {

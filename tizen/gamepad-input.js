@@ -221,6 +221,8 @@
       v: PROTOCOL_VERSION,
       type: "gamepad-connected",
       controllerId: record.controllerId,
+      // Keep the legacy field for the currently deployed single-controller bridge.
+      index: record.browserIndex,
       browserIndex: record.browserIndex,
       id: record.id,
       mapping: record.mapping,

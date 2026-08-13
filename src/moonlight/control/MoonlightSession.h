@@ -57,12 +57,15 @@ class MoonlightSession {
 public:
     using Logger = std::function<void(const std::string&)>;
     using TerminationHandler = std::function<void()>;
+    using RumbleHandler = std::function<void(std::uint16_t, std::uint16_t, std::uint16_t)>;
 
     MoonlightSession(MediaSender& sender,
                      MoonlightIdentity& identity,
                      MoonlightSessionOptions options,
                      Logger logger,
-                     TerminationHandler terminationHandler);
+                     TerminationHandler terminationHandler,
+                     RumbleHandler rumbleHandler,
+                     RumbleHandler triggerRumbleHandler);
     ~MoonlightSession();
 
     MoonlightSession(const MoonlightSession&) = delete;
@@ -97,6 +100,12 @@ private:
     static void logMessageCallback(const char* format, ...);
     static void connectionStatusCallback(int status);
     static void setHdrModeCallback(bool hdrEnabled);
+    static void rumbleCallback(unsigned short controllerNumber,
+                               unsigned short lowFrequencyMotor,
+                               unsigned short highFrequencyMotor);
+    static void rumbleTriggersCallback(std::uint16_t controllerNumber,
+                                       std::uint16_t leftTriggerMotor,
+                                       std::uint16_t rightTriggerMotor);
 
     void configureConnectionCallbacks();
     void logHdrMetadata() const;
@@ -109,6 +118,8 @@ private:
     MoonlightSessionOptions options_;
     Logger logger_;
     TerminationHandler terminationHandler_;
+    RumbleHandler rumbleHandler_;
+    RumbleHandler triggerRumbleHandler_;
     std::atomic<State> state_ = State::Idle;
     CONNECTION_LISTENER_CALLBACKS connectionCallbacks_{};
     std::unique_ptr<MoonlightMediaBridge> mediaBridge_;

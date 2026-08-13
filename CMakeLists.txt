@@ -68,7 +68,7 @@ target_link_libraries(moonlight_media_bridge PUBLIC
 )
 
 add_library(moonlight_input_bridge
-    src/moonlight/input/MoonlightInputBridge.cpp
+    src/moonlight/input/MoonlightInputBridgeV2.cpp
 )
 
 target_compile_features(moonlight_input_bridge PUBLIC cxx_std_20)
@@ -172,7 +172,7 @@ if(BUILD_TESTING)
     )
 
     add_executable(moonlight_input_bridge_test
-        tests/MoonlightInputBridgeTest.cpp
+        tests/MoonlightInputBridgeV2Test.cpp
     )
     target_link_libraries(moonlight_input_bridge_test PRIVATE moonlight_input_bridge)
 
