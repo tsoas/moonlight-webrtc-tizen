@@ -3,498 +3,92 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Moonlight WebRTC Tizen</title>
-  <style>
-    * {
-      box-sizing: border-box;
-      letter-spacing: 0;
-    }
-
-    html,
-    body {
-      width: 100%;
-      height: 100%;
-      margin: 0;
-      overflow: hidden;
-      background: #090b0e;
-      color: #f5f7fa;
-      font-family: Arial, sans-serif;
-    }
-
-    button,
-    select {
-      font: inherit;
-    }
-
-    [hidden] {
-      display: none !important;
-    }
-
-    #video {
-      position: fixed;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      background: #000;
-    }
-
-    .screen {
-      position: fixed;
-      inset: 0;
-    }
-
-    #home-screen {
-      display: grid;
-      grid-template-columns: minmax(440px, 38%) 1fr;
-      background: #10141a;
-    }
-
-    .brand-band {
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      min-width: 0;
-      padding: 76px 64px 58px;
-      border-right: 2px solid #2b333d;
-      background: #0a0d11;
-    }
-
-    .brand-band h1 {
-      max-width: 620px;
-      margin: 0;
-      color: #fff;
-      font-size: 66px;
-      line-height: 1.04;
-      font-weight: 700;
-    }
-
-    .brand-band p {
-      margin: 24px 0 0;
-      color: #9ea9b5;
-      font-size: 24px;
-      line-height: 1.45;
-    }
-
-    .status-list {
-      display: grid;
-      gap: 14px;
-      margin: 0;
-    }
-
-    .status-list div {
-      display: grid;
-      grid-template-columns: 150px 1fr;
-      gap: 18px;
-      align-items: baseline;
-      padding-top: 14px;
-      border-top: 1px solid #2b333d;
-    }
-
-    .status-list dt,
-    .status-list dd {
-      margin: 0;
-      font-size: 22px;
-    }
-
-    .status-list dt {
-      color: #8995a3;
-    }
-
-    .status-list dd {
-      overflow: hidden;
-      color: #fff;
-      font-weight: 700;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .setup-band {
-      min-width: 0;
-      padding: 68px 7vw;
-      overflow: hidden;
-    }
-
-    .setup-band h2 {
-      margin: 0 0 38px;
-      font-size: 34px;
-    }
-
-    .settings-grid {
-      display: grid;
-      grid-template-columns: minmax(210px, 0.7fr) minmax(360px, 1.3fr);
-      gap: 18px 34px;
-      align-items: center;
-      max-width: 940px;
-    }
-
-    .settings-grid label,
-    .settings-grid .setting-label {
-      color: #aeb7c2;
-      font-size: 23px;
-      font-weight: 700;
-    }
-
-    .fixed-value {
-      min-width: 0;
-      padding: 18px 20px;
-      border-bottom: 2px solid #343e49;
-      color: #e9edf2;
-      font-size: 24px;
-    }
-
-    select,
-    .action-button {
-      min-width: 0;
-      min-height: 66px;
-      border: 2px solid #3c4754;
-      border-radius: 6px;
-      outline: none;
-      background: #171d24;
-      color: #fff;
-      font-size: 24px;
-    }
-
-    select {
-      width: 100%;
-      padding: 0 18px;
-    }
-
-    .action-button {
-      padding: 0 28px;
-      font-weight: 700;
-    }
-
-    select:focus,
-    .action-button:focus,
-    .focus-visible {
-      border-color: #61dafb;
-      box-shadow: 0 0 0 5px rgba(97, 218, 251, 0.24);
-    }
-
-    #play-button {
-      width: 100%;
-      max-width: 940px;
-      height: 78px;
-      margin-top: 36px;
-      border-color: #4ad486;
-      background: #126336;
-      font-size: 29px;
-    }
-
-    #play-button:disabled {
-      border-color: #3c4754;
-      background: #252c34;
-      color: #7f8994;
-    }
-
-    #home-message {
-      min-height: 34px;
-      max-width: 940px;
-      margin: 24px 0 0;
-      color: #b9c2cc;
-      font-size: 21px;
-    }
-
-    #home-message.error {
-      color: #ff8b8b;
-    }
-
-    #streaming-screen {
-      pointer-events: none;
-    }
-
-    #stream-overlay {
-      position: fixed;
-      top: 32px;
-      left: 32px;
-      width: 520px;
-      padding: 24px 26px;
-      border-left: 5px solid #4ad486;
-      background: rgba(8, 11, 14, 0.9);
-      transition: opacity 180ms ease;
-    }
-
-    #stream-overlay.faded {
-      opacity: 0;
-    }
-
-    #stream-overlay h2 {
-      margin: 0 0 16px;
-      font-size: 28px;
-    }
-
-    .stream-facts {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px 22px;
-      margin: 0;
-    }
-
-    .stream-facts div {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding-bottom: 5px;
-      border-bottom: 1px solid #35404a;
-    }
-
-    .stream-facts dt,
-    .stream-facts dd {
-      margin: 0;
-      font-size: 18px;
-    }
-
-    .stream-facts dt {
-      color: #9ba7b3;
-    }
-
-    .stream-facts dd {
-      font-weight: 700;
-    }
-
-    #stream-menu {
-      position: fixed;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      pointer-events: auto;
-      background: rgba(0, 0, 0, 0.66);
-    }
-
-    .menu-panel {
-      width: 560px;
-      padding: 34px;
-      border: 2px solid #3b4652;
-      border-radius: 6px;
-      background: #11161c;
-    }
-
-    .menu-panel h2 {
-      margin: 0 0 24px;
-      font-size: 31px;
-    }
-
-    .menu-actions {
-      display: grid;
-      gap: 14px;
-    }
-
-    .menu-actions .action-button {
-      width: 100%;
-    }
-
-    #stop-button {
-      border-color: #ff6b6b;
-      background: #6d1d25;
-    }
-
-    #diagnostics {
-      position: fixed;
-      top: 24px;
-      right: 24px;
-      width: 620px;
-      max-height: calc(100vh - 48px);
-      padding: 20px;
-      overflow: hidden;
-      pointer-events: none;
-      border-left: 5px solid #61dafb;
-      background: rgba(5, 7, 10, 0.92);
-    }
-
-    #diagnostics.has-error {
-      border-left-color: #ff6b6b;
-    }
-
-    #diagnostics h2 {
-      margin: 14px 0 8px;
-      font-size: 18px;
-    }
-
-    #diagnostics dl {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 7px 20px;
-      margin: 0;
-    }
-
-    #diagnostics dl div {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      border-bottom: 1px solid #34404b;
-    }
-
-    #diagnostics dt,
-    #diagnostics dd {
-      margin: 0;
-      font-size: 16px;
-    }
-
-    #diagnostics dd {
-      max-width: 290px;
-      overflow: hidden;
-      font-family: monospace;
-      font-weight: 700;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    #log {
-      height: 130px;
-      margin: 10px 0 0;
-      overflow: hidden;
-      color: #d9e0e7;
-      font: 14px/1.35 monospace;
-      white-space: pre-wrap;
-    }
-
-    #playback-prompt {
-      position: fixed;
-      right: 32px;
-      bottom: 32px;
-      padding: 18px 22px;
-      border-left: 5px solid #ffd166;
-      background: rgba(0, 0, 0, 0.92);
-      font-size: 24px;
-      font-weight: 700;
-    }
-  </style>
+  <title>Moonlight WebRTC Client</title>
+  <link rel="stylesheet" href="ui.css">
 </head>
 <body>
   <video id="video" autoplay playsinline hidden></video>
+  <main id="home-screen" class="app-shell" aria-label="Moonlight WebRTC Client">
+    <header id="top-bar" class="top-bar">
+      <button id="top-back-button" class="top-back-button focusable" type="button" hidden aria-label="Back"><span aria-hidden="true">&#8592;</span></button>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span id="top-title">Moonlight WebRTC Client</span></div>
+      <button id="settings-button" class="top-action focusable" type="button"><span class="settings-glyph" aria-hidden="true">&#9881;</span><span>Settings</span></button>
+    </header>
 
-  <main id="home-screen" class="screen">
-    <section class="brand-band" aria-label="Gateway status">
-      <div>
-        <h1>Moonlight WebRTC Tizen</h1>
-        <p>Choose a Sunshine application and stream settings from the TV.</p>
-      </div>
-      <dl class="status-list">
-        <div><dt>Gateway</dt><dd id="gateway-state">Disconnected</dd></div>
-        <div><dt>Sunshine</dt><dd id="sunshine-state">Unknown</dd></div>
-        <div><dt>Session</dt><dd id="session-state">Idle</dd></div>
-      </dl>
+    <section id="gateway-screen" class="page-screen" aria-labelledby="gateway-heading">
+      <h1 id="gateway-heading">Gateway</h1>
+      <div class="gateway-grid"><button id="gateway-card" class="gateway-card focusable" type="button" disabled>
+        <span class="gateway-icon" aria-hidden="true"></span><span id="gateway-name" class="gateway-name">Moonlight Gateway</span>
+        <span class="gateway-status-line"><span id="gateway-status-dot" class="status-dot"></span><span id="gateway-card-status">Connecting</span></span>
+        <span id="gateway-address" class="gateway-address">-</span>
+      </button></div>
+      <p id="home-message" class="page-message" aria-live="polite">Connecting to Gateway...</p>
+      <dl class="visually-hidden" aria-live="polite"><div><dt>Gateway</dt><dd id="gateway-state">Disconnected</dd></div><div><dt>Sunshine</dt><dd id="sunshine-state">Unknown</dd></div><div><dt>Session</dt><dd id="session-state">Idle</dd></div></dl>
     </section>
 
-    <section class="setup-band" aria-label="Session setup">
-      <h2>Session setup</h2>
-      <div class="settings-grid">
-        <label for="app-select">Application</label>
-        <select id="app-select" class="focusable" disabled>
-          <option>Waiting for Sunshine...</option>
-        </select>
-
-        <label for="resolution-select">Resolution</label>
-        <select id="resolution-select" class="focusable">
-          <option value="1280x720">1280 × 720</option>
-          <option value="1920x1080">1920 × 1080</option>
-        </select>
-
-        <span class="setting-label">Frame rate</span>
-        <span class="fixed-value">60 FPS</span>
-
-        <label for="codec-select">Codec</label>
-        <select id="codec-select" class="focusable">
-          <option value="h264">H.264</option>
-          <option value="hevc">HEVC (H.265)</option>
-        </select>
-
-        <label for="hdr-select">HDR</label>
-        <select id="hdr-select" class="focusable">
-          <option value="false">Off</option>
-        </select>
-
-        <label for="bitrate-select">Bitrate</label>
-        <select id="bitrate-select" class="focusable">
-          <option value="10000">10 Mbps</option>
-          <option value="12000" selected>12 Mbps</option>
-          <option value="15000">15 Mbps</option>
-          <option value="20000">20 Mbps</option>
-          <option value="25000">25 Mbps</option>
-          <option value="30000">30 Mbps</option>
-        </select>
-      </div>
-
-      <button id="play-button" class="action-button focusable" type="button" disabled>PLAY</button>
-      <p id="home-message" aria-live="polite">Connecting to Moonlight WebRTC Gateway...</p>
+    <section id="applications-screen" class="page-screen" hidden aria-labelledby="applications-heading">
+      <h1 id="applications-heading">Applications</h1>
+      <div id="applications-grid" class="applications-grid" aria-label="Sunshine applications"></div>
+      <select id="app-select" class="visually-hidden" aria-hidden="true" tabindex="-1" disabled><option>Waiting for Sunshine...</option></select>
+      <button id="play-button" class="visually-hidden" type="button" disabled>Launch</button>
     </section>
+
+    <section id="settings-screen" class="page-screen settings-screen" hidden aria-labelledby="settings-heading">
+      <h1 id="settings-heading" class="visually-hidden">Settings</h1>
+      <nav id="settings-categories" class="settings-categories" aria-label="Settings categories">
+        <button class="settings-category focusable is-selected" type="button" data-category="video"><span class="category-icon" aria-hidden="true">&#9635;</span><span>Video</span><span aria-hidden="true">&#8250;</span></button>
+        <button class="settings-category focusable" type="button" data-category="audio"><span class="category-icon" aria-hidden="true">&#9835;</span><span>Audio</span><span aria-hidden="true">&#8250;</span></button>
+        <button class="settings-category focusable" type="button" data-category="input"><span class="category-icon" aria-hidden="true">&#127918;</span><span>Input</span><span aria-hidden="true">&#8250;</span></button>
+        <button class="settings-category focusable" type="button" data-category="connection"><span class="category-icon" aria-hidden="true">&#9678;</span><span>Connection</span><span aria-hidden="true">&#8250;</span></button>
+        <button class="settings-category focusable" type="button" data-category="about"><span class="category-icon" aria-hidden="true">i</span><span>About</span><span aria-hidden="true">&#8250;</span></button>
+      </nav>
+      <div class="settings-content">
+        <section class="settings-panel" data-settings-panel="video" aria-label="Video settings">
+          <label class="setting-row" for="resolution-select"><span>Resolution</span><select id="resolution-select" class="setting-select focusable"><option value="1280x720">1280 × 720</option><option value="1920x1080">1920 × 1080</option></select></label>
+          <label class="setting-row" for="codec-select"><span>Codec</span><select id="codec-select" class="setting-select focusable"><option value="h264">H.264</option><option value="hevc">HEVC (H.265)</option></select></label>
+          <label class="setting-row" for="hdr-select"><span>HDR</span><select id="hdr-select" class="setting-select focusable"><option value="false">Off</option></select></label>
+          <label class="setting-row" for="bitrate-select"><span>Bitrate</span><select id="bitrate-select" class="setting-select focusable"><option value="10000">10 Mbps</option><option value="12000" selected>12 Mbps</option><option value="15000">15 Mbps</option><option value="20000">20 Mbps</option><option value="25000">25 Mbps</option><option value="30000">30 Mbps</option></select></label>
+          <div class="setting-row setting-row-readonly" aria-label="FPS: 60 FPS, fixed"><span>FPS</span><span class="setting-value"><strong>60 FPS</strong><small>Fixed</small></span></div>
+        </section>
+        <section class="settings-panel" data-settings-panel="audio" hidden aria-label="Audio settings"><div class="setting-row setting-row-readonly"><span>Audio</span><span class="setting-value"><strong>Stereo</strong><small>48 kHz Opus</small></span></div></section>
+        <section class="settings-panel" data-settings-panel="input" hidden aria-label="Input settings">
+          <div class="setting-row setting-row-readonly"><span>Controller</span><span id="input-controller-name" class="setting-value"><strong>Not connected</strong></span></div>
+          <div class="setting-row setting-row-readonly"><span>Rumble</span><span class="setting-value"><strong>Enabled</strong><small>Always enabled for now</small></span></div>
+          <div class="setting-row setting-row-disabled" aria-disabled="true"><span>Mouse emulation</span><span class="setting-value"><strong>Coming soon</strong></span></div>
+        </section>
+        <section class="settings-panel" data-settings-panel="connection" hidden aria-label="Connection settings">
+          <div class="setting-row setting-row-readonly"><span>Gateway</span><span id="connection-gateway-name" class="setting-value"><strong>Moonlight Gateway</strong></span></div>
+          <div class="setting-row setting-row-readonly"><span>Gateway address</span><span id="connection-gateway-address" class="setting-value"><strong>-</strong></span></div>
+          <div class="setting-row setting-row-readonly"><span>Sunshine</span><span id="connection-sunshine-state" class="setting-value"><strong>Unknown</strong></span></div>
+          <div class="setting-row setting-row-readonly"><span>WebRTC</span><span id="connection-webrtc-state" class="setting-value"><strong>Idle</strong></span></div>
+        </section>
+        <section class="settings-panel" data-settings-panel="about" hidden aria-label="About Moonlight WebRTC Client">
+          <div class="setting-row setting-row-readonly"><span>Application</span><span class="setting-value"><strong>Moonlight WebRTC Client</strong></span></div>
+          <div class="setting-row setting-row-readonly"><span>Version</span><span class="setting-value"><strong>1.0.0</strong></span></div>
+          <div class="setting-row setting-row-readonly"><span>Gateway protocol</span><span class="setting-value"><strong>Version 1</strong></span></div>
+        </section>
+      </div>
+    </section>
+    <footer id="control-hints" class="control-hints" aria-label="Remote control hints"><span><kbd>OK</kbd><span id="hint-primary">Select</span></span><span><kbd class="back-key">&#8592;</kbd><span id="hint-back">Back</span></span></footer>
   </main>
 
-  <section id="streaming-screen" class="screen" hidden aria-label="Streaming session">
-    <aside id="stream-overlay">
-      <h2 id="overlay-app">Desktop</h2>
-      <dl class="stream-facts">
-        <div><dt>Resolution</dt><dd id="overlay-resolution">-</dd></div>
-        <div><dt>FPS</dt><dd id="overlay-fps">60</dd></div>
-        <div><dt>Codec</dt><dd id="overlay-codec">H.264</dd></div>
-        <div><dt>Bitrate</dt><dd id="overlay-bitrate">-</dd></div>
-        <div><dt>HDR</dt><dd id="overlay-hdr">Off</dd></div>
-        <div><dt>Gamepad</dt><dd id="overlay-gamepad">Disconnected</dd></div>
-        <div><dt>Connection</dt><dd id="overlay-connection">Starting</dd></div>
-      </dl>
-    </aside>
-
-    <div id="stream-menu" hidden>
-      <section class="menu-panel" aria-label="Stream menu">
-        <h2>Stream menu</h2>
-        <div class="menu-actions">
-          <button id="continue-button" class="action-button focusable" type="button">CONTINUE</button>
-          <button id="diagnostics-button" class="action-button focusable" type="button">SHOW DIAGNOSTICS</button>
-          <button id="stop-button" class="action-button focusable" type="button">STOP SESSION</button>
-        </div>
-      </section>
-    </div>
+  <section id="streaming-screen" class="streaming-screen" hidden aria-label="Streaming session">
+    <aside id="stream-overlay" class="stream-overlay"><h2 id="overlay-app">Desktop</h2><dl class="stream-facts"><div><dt>Resolution</dt><dd id="overlay-resolution">-</dd></div><div><dt>FPS</dt><dd id="overlay-fps">60</dd></div><div><dt>Codec</dt><dd id="overlay-codec">H.264</dd></div><div><dt>Bitrate</dt><dd id="overlay-bitrate">-</dd></div><div><dt>HDR</dt><dd id="overlay-hdr">Off</dd></div><div><dt>Gamepad</dt><dd id="overlay-gamepad">Disconnected</dd></div><div><dt>Connection</dt><dd id="overlay-connection">Starting</dd></div></dl></aside>
+    <div id="stream-menu" class="stream-menu" hidden><section class="menu-panel" aria-label="Stream menu"><h2>Streaming</h2><div class="menu-actions"><button id="continue-button" class="menu-button focusable" type="button">Resume</button><button id="diagnostics-button" class="menu-button focusable" type="button">Show statistics</button><button id="stop-button" class="menu-button menu-button-danger focusable" type="button">Stop streaming</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Resume</p></section></div>
   </section>
 
-  <aside id="diagnostics" hidden aria-label="WebRTC diagnostics">
-    <h2>Connection</h2>
-    <dl>
-      <div><dt>Peer</dt><dd id="connection-state">new</dd></div>
-      <div><dt>ICE</dt><dd id="ice-state">new</dd></div>
-      <div><dt>Control</dt><dd id="control-channel-state">unavailable</dd></div>
-      <div><dt>Input</dt><dd id="input-channel-state">unavailable</dd></div>
-    </dl>
-    <h2>Gamepad</h2>
-    <dl>
-      <div><dt>State</dt><dd id="gamepad-state">DISCONNECTED</dd></div>
-      <div><dt>ID</dt><dd id="gamepad-id">-</dd></div>
-      <div><dt>Mapping</dt><dd id="gamepad-mapping">-</dd></div>
-      <div><dt>Messages/sec</dt><dd id="input-send-rate">0.0</dd></div>
-      <div><dt>Sequence</dt><dd id="last-input-sequence">-</dd></div>
-    </dl>
-    <h2>Media</h2>
-    <dl>
-      <div><dt>Requested resolution</dt><dd id="requested-resolution">-</dd></div>
-      <div><dt>Requested codec</dt><dd id="requested-codec">-</dd></div>
-      <div><dt>Requested HDR</dt><dd id="requested-hdr">Off</dd></div>
-      <div><dt>Requested bitrate</dt><dd id="requested-bitrate">-</dd></div>
-      <div><dt>Actual resolution</dt><dd id="actual-resolution">0 × 0</dd></div>
-      <div><dt>Received codec</dt><dd id="received-codec">-</dd></div>
-      <div><dt>Color space</dt><dd id="received-color-space">unavailable</dd></div>
-      <div><dt>Transfer</dt><dd id="received-transfer">unavailable</dd></div>
-      <div><dt>Bit depth</dt><dd id="received-bit-depth">unavailable</dd></div>
-      <div><dt>HDR indication</dt><dd id="received-hdr">unavailable</dd></div>
-      <div><dt>Remote tracks</dt><dd id="remote-tracks">0</dd></div>
-      <div><dt>Video tracks</dt><dd id="video-tracks">0</dd></div>
-      <div><dt>Audio tracks</dt><dd id="audio-tracks">0</dd></div>
-      <div><dt>Frames received</dt><dd id="frames-received">0</dd></div>
-      <div><dt>Frames decoded</dt><dd id="frames-decoded">0</dd></div>
-      <div><dt>Decoded FPS</dt><dd id="decoded-fps">0</dd></div>
-      <div><dt>Frames dropped</dt><dd id="frames-dropped">0</dd></div>
-      <div><dt>Video packets</dt><dd id="packets-received">0</dd></div>
-      <div><dt>Video lost</dt><dd id="packets-lost">0</dd></div>
-      <div><dt>Video bytes</dt><dd id="bytes-received">0</dd></div>
-      <div><dt>Audio packets</dt><dd id="audio-packets-received">0</dd></div>
-      <div><dt>Audio lost</dt><dd id="audio-packets-lost">0</dd></div>
-      <div><dt>Audio bytes</dt><dd id="audio-bytes-received">0</dd></div>
-      <div><dt>Audio jitter</dt><dd id="audio-jitter">0</dd></div>
-    </dl>
-    <pre id="log" aria-live="assertive"></pre>
+  <aside id="diagnostics" class="diagnostics" hidden aria-label="WebRTC diagnostics">
+    <h2>Connection</h2><dl><div><dt>Peer</dt><dd id="connection-state">new</dd></div><div><dt>ICE</dt><dd id="ice-state">new</dd></div><div><dt>Control</dt><dd id="control-channel-state">unavailable</dd></div><div><dt>Input</dt><dd id="input-channel-state">unavailable</dd></div></dl>
+    <h2>Gamepad</h2><dl><div><dt>State</dt><dd id="gamepad-state">DISCONNECTED</dd></div><div><dt>ID</dt><dd id="gamepad-id">-</dd></div><div><dt>Mapping</dt><dd id="gamepad-mapping">-</dd></div><div><dt>Messages/sec</dt><dd id="input-send-rate">0.0</dd></div><div><dt>Sequence</dt><dd id="last-input-sequence">-</dd></div></dl>
+    <h2>Media</h2><dl><div><dt>Requested resolution</dt><dd id="requested-resolution">-</dd></div><div><dt>Requested codec</dt><dd id="requested-codec">-</dd></div><div><dt>Requested HDR</dt><dd id="requested-hdr">Off</dd></div><div><dt>Requested bitrate</dt><dd id="requested-bitrate">-</dd></div><div><dt>Actual resolution</dt><dd id="actual-resolution">0 × 0</dd></div><div><dt>Received codec</dt><dd id="received-codec">-</dd></div><div><dt>Color space</dt><dd id="received-color-space">unavailable</dd></div><div><dt>Transfer</dt><dd id="received-transfer">unavailable</dd></div><div><dt>Bit depth</dt><dd id="received-bit-depth">unavailable</dd></div><div><dt>HDR indication</dt><dd id="received-hdr">unavailable</dd></div><div><dt>Remote tracks</dt><dd id="remote-tracks">0</dd></div><div><dt>Video tracks</dt><dd id="video-tracks">0</dd></div><div><dt>Audio tracks</dt><dd id="audio-tracks">0</dd></div><div><dt>Frames received</dt><dd id="frames-received">0</dd></div><div><dt>Frames decoded</dt><dd id="frames-decoded">0</dd></div><div><dt>Decoded FPS</dt><dd id="decoded-fps">0</dd></div><div><dt>Frames dropped</dt><dd id="frames-dropped">0</dd></div><div><dt>Video packets</dt><dd id="packets-received">0</dd></div><div><dt>Video lost</dt><dd id="packets-lost">0</dd></div><div><dt>Video bytes</dt><dd id="bytes-received">0</dd></div><div><dt>Audio packets</dt><dd id="audio-packets-received">0</dd></div><div><dt>Audio lost</dt><dd id="audio-packets-lost">0</dd></div><div><dt>Audio bytes</dt><dd id="audio-bytes-received">0</dd></div><div><dt>Audio jitter</dt><dd id="audio-jitter">0</dd></div></dl><pre id="log" aria-live="assertive"></pre>
   </aside>
-
-  <div id="playback-prompt" hidden>Press OK to start audio</div>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div id="mouse-mode-overlay" hidden></div>
+  <div id="playback-prompt" class="playback-prompt" hidden>Press OK to start audio</div>
+  <script src="gamepad-input.js"></script>
+  <script src="gamepad-ui-navigation.js"></script>
+  <script src="preferences.js"></script>
+  <script src="ui.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

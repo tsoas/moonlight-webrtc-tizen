@@ -3,6 +3,7 @@ const GATEWAY_PROTOCOL_VERSION = 1;
 const GAMEPAD_PROTOCOL_VERSION = 1;
 const GAMEPAD_POLL_INTERVAL_MS = 1000 / 120;
 const GAMEPAD_KEEPALIVE_INTERVAL_MS = 250;
+const preferences = ClientPreferences.create();
 
 const homeScreen = document.getElementById("home-screen");
 const streamingScreen = document.getElementById("streaming-screen");
@@ -12,6 +13,9 @@ const logElement = document.getElementById("log");
 const playbackPromptElement = document.getElementById("playback-prompt");
 const streamOverlay = document.getElementById("stream-overlay");
 const streamMenu = document.getElementById("stream-menu");
+const gatewayScreen = document.getElementById("gateway-screen");
+const applicationsScreen = document.getElementById("applications-screen");
+const settingsScreen = document.getElementById("settings-screen");
 const appSelect = document.getElementById("app-select");
 const resolutionSelect = document.getElementById("resolution-select");
 const codecSelect = document.getElementById("codec-select");
@@ -81,6 +85,7 @@ const gamepadDiagnostics = {
   inputChannel: document.getElementById("input-channel-state"),
   sendRate: document.getElementById("input-send-rate"),
   lastSequence: document.getElementById("last-input-sequence"),
+  controllers: document.getElementById("controller-diagnostics"),
 };
 
 const GAMEPAD_BUTTONS = {
@@ -121,19 +126,15 @@ let previousDecodedSample = null;
 let playbackErrorReported = false;
 let controlDataChannel = null;
 let gamepadDataChannel = null;
-let activeGamepadIndex = null;
-let gamepadAnnounced = false;
-let gamepadPollTimer = null;
-let nextGamepadPollTime = 0;
-let gamepadSequence = 0;
-let lastGamepadFingerprint = "";
-let lastFullStateSendTime = 0;
-let inputRateWindowStart = performance.now();
-let inputMessagesInWindow = 0;
+let gamepadInputSessionInitialized = false;
 let videoModes = [];
 let codecSelectionWasIntentional = false;
 let updatingCodecOptions = false;
 let lastStatisticsConsoleTime = 0;
+let applications = [];
+let ui = null;
+let currentGatewayName = "Moonlight Gateway";
+let savedPreferences = preferences.load();
 
 function log(message) {
   console.log(message);
@@ -157,17 +158,53 @@ function setHomeMessage(message, isError) {
   homeMessage.classList.toggle("error", Boolean(isError));
 }
 
+function showNotification(title, message, isError) {
+  if (ui) {
+    ui.showToast(title, message, Boolean(isError));
+  }
+}
+
+function gatewayDisplayName(message) {
+  if (message && typeof message.gatewayName === "string" && message.gatewayName.trim()) {
+    currentGatewayName = message.gatewayName.trim();
+  }
+  return currentGatewayName;
+}
+
+function gatewayAddress() {
+  try {
+    return new URL(SIGNALING_URL).hostname || "-";
+  } catch (error) {
+    return "-";
+  }
+}
+
+function updateGatewayCard(message) {
+  if (!ui) {
+    return;
+  }
+  const state = gatewayConnected ? "Connected" : "Disconnected";
+  ui.setGateway({
+    name: gatewayDisplayName(message),
+    address: gatewayAddress(),
+    state: state,
+    selectable: gatewayConnected && sunshineReady && appsLoaded && sessionState === "idle",
+  });
+}
+
 function reportError(context, error) {
   const message = context + ": " + errorMessage(error);
   diagnosticsElement.classList.add("has-error");
   setHomeMessage(message, true);
   console.error(message, error);
   log("ERROR: " + message);
+  showNotification("Connection error", message, true);
 }
 
 function updatePlayAvailability() {
   playButton.disabled = !gatewayConnected || !sunshineReady || !appsLoaded
     || sessionState !== "idle";
+  updateGatewayCard();
 }
 
 function sendGatewayMessage(message) {
@@ -193,7 +230,7 @@ function connectGateway() {
   }
 
   gatewayStateElement.textContent = "Connecting";
-  setHomeMessage("Connecting to Moonlight WebRTC Gateway...", false);
+  setHomeMessage("Connecting to Gateway...", false);
   try {
     socket = new WebSocket(SIGNALING_URL);
   } catch (error) {
@@ -209,6 +246,7 @@ function connectGateway() {
     updatePlayAvailability();
     requestApplications();
     log("Gateway WebSocket connected");
+    showNotification("Gateway connected", gatewayAddress(), false);
   });
 
   socket.addEventListener("close", function () {
@@ -223,6 +261,7 @@ function connectGateway() {
     setHomeMessage("Gateway disconnected. Reconnecting...", true);
     updatePlayAvailability();
     log("Gateway WebSocket disconnected");
+    showNotification("Gateway disconnected", "Reconnecting...", true);
     reconnectTimer = setTimeout(connectGateway, 2000);
   });
 
@@ -276,6 +315,10 @@ function handleGatewayStatus(message) {
   } else {
     sunshineStateElement.textContent = "Connected / Paired";
   }
+  if (ui) {
+    ui.setSunshineState(sunshineStateElement.textContent);
+  }
+  updateGatewayCard(message);
   updatePlayAvailability();
 }
 
@@ -294,6 +337,41 @@ function replaceSelectOptions(select, values, formatter) {
   if (previousStillExists) {
     select.value = previousValue;
   }
+}
+
+function selectHasValue(select, value) {
+  return Array.prototype.some.call(select.options, function (option) {
+    return option.value === String(value);
+  });
+}
+
+function selectSavedOrDefault(select, savedValue, defaultValue) {
+  const values = Array.prototype.map.call(select.options, function (option) { return option.value; });
+  const resolvedValue = ClientPreferences.resolveSupported(savedValue, values, defaultValue);
+  if (resolvedValue !== null && typeof resolvedValue !== "undefined" && selectHasValue(select, resolvedValue)) {
+    select.value = String(resolvedValue);
+    return true;
+  }
+  if (selectHasValue(select, defaultValue)) {
+    select.value = String(defaultValue);
+  } else if (select.options.length > 0) {
+    select.selectedIndex = 0;
+  }
+  return false;
+}
+
+function currentPreferenceValues() {
+  return {
+    resolution: resolutionSelect.value || null,
+    codec: codecSelect.value || null,
+    hdr: hdrSelect.value === "true",
+    bitrateKbps: Number.isInteger(Number(bitrateSelect.value))
+      ? Number(bitrateSelect.value) : null,
+  };
+}
+
+function persistCurrentPreferences() {
+  savedPreferences = preferences.replace(currentPreferenceValues());
 }
 
 function applyCapabilities(message) {
@@ -318,9 +396,10 @@ function applyCapabilities(message) {
       label: function (bitrate) { return String(bitrate / 1000) + " Mbps"; },
     });
   }
-  resolutionSelect.value = "1280x720";
-  codecSelectionWasIntentional = false;
-  applySelectedVideoMode();
+  selectSavedOrDefault(resolutionSelect, savedPreferences.resolution, "1280x720");
+  codecSelectionWasIntentional = Boolean(savedPreferences.codec);
+  applySelectedVideoMode(savedPreferences);
+  persistCurrentPreferences();
 }
 
 function selectedVideoMode() {
@@ -333,8 +412,10 @@ function codecDisplayName(codec) {
   return codec === "hevc" ? "HEVC (H.265)" : "H.264";
 }
 
-function updateHdrOptions(mode) {
-  const hdrWasEnabled = hdrSelect.value === "true";
+function updateHdrOptions(mode, preferredHdr) {
+  const hdrWasEnabled = typeof preferredHdr === "boolean"
+    ? preferredHdr
+    : hdrSelect.value === "true";
   const supportsHdr = Boolean(mode && mode.hdrSupported);
   hdrSelect.innerHTML = "";
   const offOption = document.createElement("option");
@@ -352,12 +433,14 @@ function updateHdrOptions(mode) {
     : "false";
 }
 
-function applySelectedVideoMode() {
+function applySelectedVideoMode(preferencesToRestore) {
   const mode = selectedVideoMode();
   if (!mode || !Array.isArray(mode.codecs) || mode.codecs.length === 0) {
     return;
   }
-  const previousCodec = codecSelect.value;
+  const previousCodec = preferencesToRestore && preferencesToRestore.codec
+    ? preferencesToRestore.codec
+    : codecSelect.value;
   const keepIntentionalCodec = codecSelectionWasIntentional
     && mode.codecs.indexOf(previousCodec) >= 0;
   updatingCodecOptions = true;
@@ -367,18 +450,23 @@ function applySelectedVideoMode() {
   });
   codecSelect.value = keepIntentionalCodec ? previousCodec : mode.defaultCodec;
   updatingCodecOptions = false;
-  updateHdrOptions(mode);
-  bitrateSelect.value = String(mode.defaultBitrateKbps);
+  updateHdrOptions(mode, preferencesToRestore ? preferencesToRestore.hdr : undefined);
+  selectSavedOrDefault(
+    bitrateSelect,
+    preferencesToRestore ? preferencesToRestore.bitrateKbps : null,
+    String(mode.defaultBitrateKbps)
+  );
   if (mode.experimental) {
     setHomeMessage("2560 × 1440 is experimental on Samsung Tizen.", false);
   } else if (appsLoaded) {
-    setHomeMessage("Choose settings, then press PLAY.", false);
+    setHomeMessage("Choose video settings in Settings, then launch an application.", false);
   }
 }
 
-function applyApplications(applications) {
+function applyApplications(nextApplications) {
+  applications = Array.isArray(nextApplications) ? nextApplications : [];
   appSelect.innerHTML = "";
-  if (!Array.isArray(applications) || applications.length === 0) {
+  if (applications.length === 0) {
     appsLoaded = false;
     appSelect.disabled = true;
     const option = document.createElement("option");
@@ -386,6 +474,9 @@ function applyApplications(applications) {
     appSelect.appendChild(option);
     setHomeMessage("Sunshine returned no applications.", true);
     updatePlayAvailability();
+    if (ui) {
+      ui.renderApplications([], "");
+    }
     return;
   }
 
@@ -401,9 +492,11 @@ function applyApplications(applications) {
   appSelect.selectedIndex = desktopIndex >= 0 ? desktopIndex : 0;
   appsLoaded = true;
   appSelect.disabled = false;
-  setHomeMessage("Choose settings, then press PLAY.", false);
+  setHomeMessage("Gateway ready. Select it to browse Sunshine applications.", false);
   updatePlayAvailability();
-  focusFirstHomeControl();
+  if (ui) {
+    ui.renderApplications(applications, appSelect.value);
+  }
 }
 
 function handleGatewayError(message) {
@@ -449,6 +542,7 @@ function handleSessionStatus(message) {
     currentSessionId = 0;
     showHome();
     setHomeMessage("Session stopped. Choose settings to start again.", false);
+    showNotification("Streaming stopped", "Choose an application to start again.", false);
   } else if (message.state === "error") {
     setHomeMessage(message.message || "Session failed", true);
     if (currentSessionId) {
@@ -573,6 +667,9 @@ function createPeerConnection(sessionId) {
     const state = peerConnection.connectionState;
     connectionStateElement.textContent = state;
     overlay.connection.textContent = state;
+    if (ui) {
+      ui.setWebRtcState(readableState(state));
+    }
     log("PeerConnection state: " + state);
     if (state === "disconnected" || state === "failed" || state === "closed") {
       suspendGamepadInput(true);
@@ -664,9 +761,9 @@ async function handleOffer(message) {
 
 function closePeerConnection() {
   suspendGamepadInput(true);
+  gamepadInputSessionInitialized = false;
   controlDataChannel = null;
   gamepadDataChannel = null;
-  gamepadAnnounced = false;
   updateDataChannelState(gamepadDiagnostics.controlChannel, null);
   updateDataChannelState(gamepadDiagnostics.inputChannel, null);
   if (peerConnection) {
@@ -748,27 +845,33 @@ function showHome() {
   streamingScreen.hidden = true;
   streamMenu.hidden = true;
   diagnosticsElement.hidden = true;
-  diagnosticsButton.textContent = "SHOW DIAGNOSTICS";
+  diagnosticsButton.textContent = "Show statistics";
   updatePlayAvailability();
-  focusFirstHomeControl();
+  if (ui) {
+    ui.showGateway();
+  }
 }
 
 function showStreamMenu() {
   streamMenu.hidden = false;
   streamOverlay.classList.remove("faded");
+  gamepadInputManager.pauseForUi();
   continueButton.focus();
 }
 
 function hideStreamMenu() {
   streamMenu.hidden = true;
   showOverlayTemporarily();
+  if (sessionState === "streaming") {
+    resumeGamepadInput();
+  }
 }
 
 function toggleDiagnostics() {
   diagnosticsElement.hidden = !diagnosticsElement.hidden;
   diagnosticsButton.textContent = diagnosticsElement.hidden
-    ? "SHOW DIAGNOSTICS"
-    : "HIDE DIAGNOSTICS";
+    ? "Show statistics"
+    : "Hide statistics";
 }
 
 function focusableElements(container) {
@@ -779,13 +882,21 @@ function focusableElements(container) {
 }
 
 function focusFirstHomeControl() {
-  if (homeScreen.hidden) {
+  if (!homeScreen.hidden && ui) {
+    ui.focusDefault(ui.currentView);
+  }
+}
+
+function launchApplication(applicationId) {
+  const optionIndex = Array.prototype.findIndex.call(appSelect.options, function (option) {
+    return option.value === String(applicationId);
+  });
+  if (optionIndex < 0) {
+    reportError("Application launch", new Error("Selected Sunshine application is unavailable"));
     return;
   }
-  const elements = focusableElements(homeScreen);
-  if (elements.length > 0) {
-    elements[0].focus();
-  }
+  appSelect.selectedIndex = optionIndex;
+  startSelectedSession();
 }
 
 function moveFocus(container, direction) {
@@ -822,6 +933,53 @@ function exitApplication() {
   }
 }
 
+function gamepadUiRoute() {
+  if (streamingScreen.hidden) {
+    return "ui";
+  }
+  return streamMenu.hidden ? "gameplay" : "stream-menu";
+}
+
+function isGameplayInputActive() {
+  return gamepadUiRoute() === "gameplay";
+}
+
+function navigateUi(direction) {
+  if (gamepadUiRoute() === "stream-menu") {
+    if (direction === "up" || direction === "down") {
+      moveFocus(streamMenu, direction === "down" ? 1 : -1);
+      return true;
+    }
+    return false;
+  }
+  return ui ? ui.focusByDirection(direction) : false;
+}
+
+function activateFocusedControl() {
+  const active = document.activeElement;
+  if (!active || typeof active.click !== "function") {
+    return false;
+  }
+  active.click();
+  return true;
+}
+
+function goBackFromUiInput() {
+  if (!streamingScreen.hidden) {
+    if (streamMenu.hidden) {
+      showStreamMenu();
+    } else {
+      hideStreamMenu();
+    }
+    return true;
+  }
+  if (ui && ui.goBack()) {
+    return true;
+  }
+  exitApplication();
+  return true;
+}
+
 document.addEventListener("keydown", function (event) {
   const key = event.key;
   const keyCode = event.keyCode;
@@ -835,11 +993,7 @@ document.addEventListener("keydown", function (event) {
   if (!streamingScreen.hidden) {
     if (isBack) {
       event.preventDefault();
-      if (streamMenu.hidden) {
-        showStreamMenu();
-      } else {
-        hideStreamMenu();
-      }
+      goBackFromUiInput();
       return;
     }
     if (streamMenu.hidden) {
@@ -852,28 +1006,31 @@ document.addEventListener("keydown", function (event) {
     }
     if (isUp || isDown) {
       event.preventDefault();
-      moveFocus(streamMenu, isDown ? 1 : -1);
+      navigateUi(isDown ? "down" : "up");
     } else if (isEnter) {
       event.preventDefault();
-      document.activeElement.click();
+      activateFocusedControl();
     }
     return;
   }
 
   if (isBack) {
     event.preventDefault();
-    exitApplication();
+    goBackFromUiInput();
   } else if (isUp || isDown) {
     event.preventDefault();
-    moveFocus(homeScreen, isDown ? 1 : -1);
+    navigateUi(isDown ? "down" : "up");
   } else if (isLeft || isRight) {
     if (document.activeElement.tagName === "SELECT") {
       event.preventDefault();
       changeSelect(document.activeElement, isRight ? 1 : -1);
+    } else {
+      event.preventDefault();
+      navigateUi(isRight ? "right" : "left");
     }
   } else if (isEnter && document.activeElement.tagName !== "SELECT") {
     event.preventDefault();
-    document.activeElement.click();
+    activateFocusedControl();
   }
 });
 
@@ -883,6 +1040,7 @@ diagnosticsButton.addEventListener("click", toggleDiagnostics);
 stopButton.addEventListener("click", stopCurrentSession);
 resolutionSelect.addEventListener("change", function () {
   applySelectedVideoMode();
+  persistCurrentPreferences();
 });
 codecSelect.addEventListener("change", function () {
   if (!updatingCodecOptions) {
@@ -892,6 +1050,7 @@ codecSelect.addEventListener("change", function () {
     hdrSelect.value = "false";
   }
   updateHdrOptions(selectedVideoMode());
+  persistCurrentPreferences();
 });
 hdrSelect.addEventListener("change", function () {
   if (hdrSelect.value === "true" && codecSelect.value !== "hevc") {
@@ -905,7 +1064,9 @@ hdrSelect.addEventListener("change", function () {
       ? "1440p HDR — Experimental."
       : "2560 × 1440 is experimental on Samsung Tizen.", false);
   }
+  persistCurrentPreferences();
 });
+bitrateSelect.addEventListener("change", persistCurrentPreferences);
 
 function updateRemoteTracksForVisibility() {
   const enabled = !document.hidden;
@@ -930,15 +1091,15 @@ function updateDataChannelState(element, channel) {
   element.textContent = channel ? channel.readyState : "unavailable";
 }
 
-function currentGamepads() {
+function legacyCurrentGamepads() {
   if (!navigator.getGamepads) {
     return [];
   }
   return navigator.getGamepads() || [];
 }
 
-function activeGamepad() {
-  const gamepads = currentGamepads();
+function legacyActiveGamepad() {
+  const gamepads = legacyCurrentGamepads();
   if (activeGamepadIndex !== null && gamepads[activeGamepadIndex]) {
     return gamepads[activeGamepadIndex];
   }
@@ -1091,6 +1252,9 @@ function updateGamepadDiagnostics(gamepad) {
   gamepadDiagnostics.id.textContent = connected ? (gamepad.id || "Unknown gamepad") : "-";
   gamepadDiagnostics.mapping.textContent = connected ? (gamepad.mapping || "none") : "-";
   overlay.gamepad.textContent = connected ? "Connected" : "Disconnected";
+  if (ui) {
+    ui.setControllerName(connected ? (gamepad.id || "Unknown gamepad") : "Not connected");
+  }
 }
 
 function stopGamepadPolling() {
@@ -1145,8 +1309,8 @@ function pollGamepad() {
   scheduleGamepadPoll();
 }
 
-function resumeGamepadInput() {
-  const gamepad = activeGamepad();
+function legacyResumeGamepadInput() {
+  const gamepad = legacyActiveGamepad();
   updateGamepadDiagnostics(gamepad);
   if (!gamepad || sessionState !== "streaming") {
     return;
@@ -1159,7 +1323,7 @@ function resumeGamepadInput() {
   scheduleGamepadPoll();
 }
 
-function suspendGamepadInput(notifyGateway) {
+function legacySuspendGamepadInputV1(notifyGateway) {
   stopGamepadPolling();
   if (gamepadAnnounced) {
     sendCompleteGamepadState(neutralGamepadState(), performance.now());
@@ -1170,7 +1334,7 @@ function suspendGamepadInput(notifyGateway) {
   lastGamepadFingerprint = "";
 }
 
-function configureControlDataChannel(channel) {
+function legacyConfigureControlDataChannelV1(channel) {
   controlDataChannel = channel;
   updateDataChannelState(gamepadDiagnostics.controlChannel, channel);
   channel.onopen = function () {
@@ -1189,7 +1353,7 @@ function configureControlDataChannel(channel) {
   };
 }
 
-function configureGamepadDataChannel(channel) {
+function legacyConfigureGamepadDataChannelV1(channel) {
   gamepadDataChannel = channel;
   updateDataChannelState(gamepadDiagnostics.inputChannel, channel);
   channel.onopen = function () {
@@ -1209,27 +1373,106 @@ function configureGamepadDataChannel(channel) {
 }
 
 window.addEventListener("gamepadconnected", function (event) {
-  if (activeGamepadIndex === null) {
-    activeGamepadIndex = event.gamepad.index;
-  }
-  if (activeGamepadIndex !== event.gamepad.index) {
-    return;
-  }
-  updateGamepadDiagnostics(event.gamepad);
-  resumeGamepadInput();
+  gamepadInputManager.register(event.gamepad);
+  syncGamepadUi();
+  showNotification("Controller connected", event.gamepad.id || "Unknown gamepad", false);
+  gamepadInputManager.resume();
 });
 
 window.addEventListener("gamepaddisconnected", function (event) {
-  if (activeGamepadIndex !== event.gamepad.index) {
-    return;
-  }
-  sendCompleteGamepadState(neutralGamepadState(), performance.now());
-  notifyGamepadDisconnected();
-  stopGamepadPolling();
-  activeGamepadIndex = null;
-  updateGamepadDiagnostics(null);
-  log("Gamepad disconnected");
+  gamepadInputManager.unregister(event.gamepad.index, true);
+  syncGamepadUi();
+  showNotification("Controller disconnected", event.gamepad.id || "Unknown gamepad", false);
 });
+
+const gamepadInputManager = new window.GamepadInputManager({
+  controlChannel: function () { return controlDataChannel; },
+  gamepadChannel: function () { return gamepadDataChannel; },
+  isStreaming: isGameplayInputActive,
+  log: log,
+  reportError: reportError,
+  diagnostics: gamepadDiagnostics,
+  overlay: overlay.gamepad,
+  mouseOverlay: document.getElementById("mouse-mode-overlay"),
+});
+
+const gamepadUiNavigation = window.GamepadUiNavigation.create({
+  route: gamepadUiRoute,
+  navigate: navigateUi,
+  activate: activateFocusedControl,
+  back: goBackFromUiInput,
+});
+
+function syncGamepadUi() {
+  const gamepad = gamepadInputManager.firstGamepad();
+  if (ui) {
+    ui.setControllerName(gamepad ? (gamepad.id || "Unknown gamepad") : "Not connected");
+  }
+}
+
+function activeGamepad() {
+  return gamepadInputManager.firstGamepad();
+}
+
+function resumeGamepadInput() {
+  gamepadInputManager.resume();
+  syncGamepadUi();
+}
+
+function suspendGamepadInput(notifyGateway) {
+  gamepadInputManager.suspend(Boolean(notifyGateway));
+  syncGamepadUi();
+}
+
+function configureControlDataChannel(channel) {
+  controlDataChannel = channel;
+  updateDataChannelState(gamepadDiagnostics.controlChannel, channel);
+  channel.onopen = function () {
+    updateDataChannelState(gamepadDiagnostics.controlChannel, channel);
+    log("Control DataChannel opened");
+    gamepadInputSessionInitialized = true;
+    gamepadInputManager.beginSession();
+    syncGamepadUi();
+  };
+  channel.onmessage = function (event) {
+    gamepadInputManager.handleControlMessage(event.data);
+  };
+  channel.onclose = function () {
+    updateDataChannelState(gamepadDiagnostics.controlChannel, channel);
+    gamepadInputManager.suspend(false);
+    gamepadInputSessionInitialized = false;
+    syncGamepadUi();
+    log("Control DataChannel closed");
+  };
+  channel.onerror = function (event) {
+    reportError("Control DataChannel error", event.error || event);
+  };
+}
+
+function configureGamepadDataChannel(channel) {
+  gamepadDataChannel = channel;
+  updateDataChannelState(gamepadDiagnostics.inputChannel, channel);
+  channel.onopen = function () {
+    updateDataChannelState(gamepadDiagnostics.inputChannel, channel);
+    log("Gamepad DataChannel opened");
+    if (!gamepadInputSessionInitialized && dataChannelIsOpen(controlDataChannel)) {
+      gamepadInputSessionInitialized = true;
+      gamepadInputManager.beginSession();
+    } else {
+      gamepadInputManager.resume();
+    }
+    syncGamepadUi();
+  };
+  channel.onclose = function () {
+    updateDataChannelState(gamepadDiagnostics.inputChannel, channel);
+    gamepadInputManager.suspend(true);
+    syncGamepadUi();
+    log("Gamepad DataChannel closed");
+  };
+  channel.onerror = function (event) {
+    reportError("Gamepad DataChannel error", event.error || event);
+  };
+}
 
 function statisticValue(report, name) {
   return typeof report[name] === "undefined" ? 0 : report[name];
@@ -1376,8 +1619,22 @@ window.addEventListener("unhandledrejection", function (event) {
   reportError("Unhandled promise rejection", event.reason);
 });
 
+ui = TizenUi.create({
+  onApplicationSelected: launchApplication,
+});
+ui.setGateway({
+  name: "Moonlight Gateway",
+  address: gatewayAddress(),
+  state: "Connecting",
+  selectable: false,
+});
+ui.setSunshineState("Unknown");
+ui.setWebRtcState("Idle");
+
 setInterval(updateStatistics, 1000);
 updateTrackCounts();
-updateGamepadDiagnostics(activeGamepad());
+gamepadInputManager.updateDiagnostics();
+syncGamepadUi();
 showHome();
+gamepadUiNavigation.start();
 connectGateway();

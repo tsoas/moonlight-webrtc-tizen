@@ -330,7 +330,10 @@
 
   GamepadInputManager.prototype.handleRumble = function (message) {
     const logicalControllerNumber = Number(message.controllerSlot);
-    const record = Array.from(this.recordsById.values()).find(function (candidate) {
+    const controllerId = Number(message.controllerId);
+    const recordById = Number.isFinite(controllerId)
+      ? this.recordsById.get(controllerId) : null;
+    const record = recordById || Array.from(this.recordsById.values()).find(function (candidate) {
       return candidate.moonlightSlot === logicalControllerNumber;
     });
     if (!record || (!record.dualRumble && !record.triggerRumble)) {
@@ -344,7 +347,9 @@
       ? clampMagnitude(message.leftTrigger) : 0;
     record.rumble.rightTrigger = record.triggerRumble
       ? clampMagnitude(message.rightTrigger) : 0;
-    this.applyRumble(record, logicalControllerNumber);
+    const resolvedControllerNumber = Number.isFinite(logicalControllerNumber)
+      ? logicalControllerNumber : record.moonlightSlot;
+    this.applyRumble(record, resolvedControllerNumber);
   };
 
   GamepadInputManager.prototype.handleControlMessage = function (data) {
@@ -358,7 +363,7 @@
       this.options.log("Ignored malformed control DataChannel message");
       return;
     }
-    if (message.v !== PROTOCOL_VERSION) {
+    if (message.v !== PROTOCOL_VERSION && message.v !== 1) {
       return;
     }
     const record = this.recordsById.get(Number(message.controllerId));
@@ -457,6 +462,21 @@
     });
     this.nextPollTime = performance.now();
     this.schedulePoll();
+  };
+
+  GamepadInputManager.prototype.pauseForUi = function () {
+    if (this.pollTimer !== null) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+    const now = performance.now();
+    const neutral = neutralState();
+    this.recordsByIndex.forEach(function (record) {
+      if (record.announced) {
+        this.sendState(record, neutral, now);
+      }
+    }, this);
+    this.updateDiagnostics();
   };
 
   GamepadInputManager.prototype.suspend = function (notifyGateway) {
