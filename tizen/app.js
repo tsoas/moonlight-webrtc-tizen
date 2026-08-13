@@ -21,6 +21,9 @@ const resolutionSelect = document.getElementById("resolution-select");
 const codecSelect = document.getElementById("codec-select");
 const hdrSelect = document.getElementById("hdr-select");
 const bitrateSelect = document.getElementById("bitrate-select");
+const settingsSelectorMenu = document.getElementById("settings-selector-menu");
+const settingsSelectorHeading = document.getElementById("settings-selector-heading");
+const settingsSelectorOptions = document.getElementById("settings-selector-options");
 const playButton = document.getElementById("play-button");
 const continueButton = document.getElementById("continue-button");
 const diagnosticsButton = document.getElementById("diagnostics-button");
@@ -127,6 +130,8 @@ let playbackErrorReported = false;
 let controlDataChannel = null;
 let gamepadDataChannel = null;
 let gamepadInputSessionInitialized = false;
+let sessionTeardownInProgress = false;
+let openSettingSelect = null;
 let videoModes = [];
 let codecSelectionWasIntentional = false;
 let updatingCodecOptions = false;
@@ -199,6 +204,16 @@ function reportError(context, error) {
   console.error(message, error);
   log("ERROR: " + message);
   showNotification("Connection error", message, true);
+}
+
+function reportDataChannelError(context, error) {
+  const message = context + ": " + errorMessage(error);
+  if (sessionTeardownInProgress) {
+    console.debug("Expected session teardown: " + message, error);
+    log("Expected session teardown: " + message);
+    return;
+  }
+  reportError(context, error);
 }
 
 function updatePlayAvailability() {
@@ -534,6 +549,7 @@ function handleSessionStatus(message) {
 
   overlay.connection.textContent = readableState(message.state);
   if (message.state === "streaming") {
+    sessionTeardownInProgress = false;
     showStreaming();
     resumeGamepadInput();
     setHomeMessage("Streaming", false);
@@ -577,6 +593,7 @@ function startSelectedSession() {
     return;
   }
   selectedSession = selectedSettings();
+  sessionTeardownInProgress = false;
   sessionState = "starting";
   updatePlayAvailability();
   updateStreamOverlay();
@@ -609,6 +626,7 @@ function stopCurrentSession() {
     return;
   }
   try {
+    sessionTeardownInProgress = true;
     sendGatewayMessage({ type: "stop-session" });
     sessionState = "stopping";
     overlay.connection.textContent = "Stopping";
@@ -620,6 +638,7 @@ function stopCurrentSession() {
 
 function createPeerConnection(sessionId) {
   closePeerConnection();
+  sessionTeardownInProgress = false;
   currentSessionId = sessionId;
   pendingRemoteCandidates = [];
   previousDecodedSample = null;
@@ -672,7 +691,7 @@ function createPeerConnection(sessionId) {
     }
     log("PeerConnection state: " + state);
     if (state === "disconnected" || state === "failed" || state === "closed") {
-      suspendGamepadInput(true);
+      suspendGamepadInput(!sessionTeardownInProgress);
     }
   };
 
@@ -760,7 +779,8 @@ async function handleOffer(message) {
 }
 
 function closePeerConnection() {
-  suspendGamepadInput(true);
+  sessionTeardownInProgress = true;
+  suspendGamepadInput(false);
   gamepadInputSessionInitialized = false;
   controlDataChannel = null;
   gamepadDataChannel = null;
@@ -940,11 +960,72 @@ function gamepadUiRoute() {
   return streamMenu.hidden ? "gameplay" : "stream-menu";
 }
 
+function settingLabel(select) {
+  const row = select && select.closest(".setting-row");
+  const label = row && row.querySelector("span");
+  return label ? label.textContent : "Select value";
+}
+
+function settingsSelectorIsOpen() {
+  return !settingsSelectorMenu.hidden;
+}
+
+function closeSettingsSelector() {
+  if (!settingsSelectorIsOpen()) {
+    return false;
+  }
+  settingsSelectorMenu.hidden = true;
+  settingsSelectorOptions.textContent = "";
+  const select = openSettingSelect;
+  openSettingSelect = null;
+  if (select) {
+    select.focus();
+  }
+  return true;
+}
+
+function openSettingsSelector(select) {
+  if (!select || select.disabled || select.tagName !== "SELECT") {
+    return false;
+  }
+  openSettingSelect = select;
+  settingsSelectorHeading.textContent = settingLabel(select);
+  settingsSelectorOptions.textContent = "";
+  Array.prototype.forEach.call(select.options, function (option, index) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "settings-selector-option focusable";
+    button.textContent = option.textContent;
+    button.dataset.optionIndex = String(index);
+    button.classList.toggle("is-current", option.selected);
+    button.addEventListener("click", function () {
+      if (!openSettingSelect) {
+        return;
+      }
+      openSettingSelect.selectedIndex = Number(button.dataset.optionIndex);
+      openSettingSelect.dispatchEvent(new Event("change"));
+      closeSettingsSelector();
+    });
+    settingsSelectorOptions.appendChild(button);
+  });
+  settingsSelectorMenu.hidden = false;
+  const selected = settingsSelectorOptions.querySelector(".is-current");
+  (selected || settingsSelectorOptions.querySelector(".focusable")).focus();
+  return true;
+}
+
 function isGameplayInputActive() {
   return gamepadUiRoute() === "gameplay";
 }
 
 function navigateUi(direction) {
+  if (settingsSelectorIsOpen()) {
+    if (direction === "up" || direction === "down") {
+      moveFocus(settingsSelectorOptions, direction === "down" ? 1 : -1);
+      return true;
+    }
+    return false;
+  }
   if (gamepadUiRoute() === "stream-menu") {
     if (direction === "up" || direction === "down") {
       moveFocus(streamMenu, direction === "down" ? 1 : -1);
@@ -957,6 +1038,16 @@ function navigateUi(direction) {
 
 function activateFocusedControl() {
   const active = document.activeElement;
+  if (settingsSelectorIsOpen()) {
+    if (active && active.classList.contains("settings-selector-option")) {
+      active.click();
+      return true;
+    }
+    return false;
+  }
+  if (active && active.tagName === "SELECT") {
+    return openSettingsSelector(active);
+  }
   if (!active || typeof active.click !== "function") {
     return false;
   }
@@ -965,6 +1056,9 @@ function activateFocusedControl() {
 }
 
 function goBackFromUiInput() {
+  if (closeSettingsSelector()) {
+    return true;
+  }
   if (!streamingScreen.hidden) {
     if (streamMenu.hidden) {
       showStreamMenu();
@@ -972,6 +1066,17 @@ function goBackFromUiInput() {
       hideStreamMenu();
     }
     return true;
+  }
+
+  if (settingsSelectorIsOpen()) {
+    if (isUp || isDown) {
+      event.preventDefault();
+      navigateUi(isDown ? "down" : "up");
+    } else if (isEnter) {
+      event.preventDefault();
+      activateFocusedControl();
+    }
+    return;
   }
   if (ui && ui.goBack()) {
     return true;
@@ -1028,9 +1133,10 @@ document.addEventListener("keydown", function (event) {
       event.preventDefault();
       navigateUi(isRight ? "right" : "left");
     }
-  } else if (isEnter && document.activeElement.tagName !== "SELECT") {
-    event.preventDefault();
-    activateFocusedControl();
+  } else if (isEnter) {
+    if (activateFocusedControl()) {
+      event.preventDefault();
+    }
   }
 });
 
@@ -1445,7 +1551,7 @@ function configureControlDataChannel(channel) {
     log("Control DataChannel closed");
   };
   channel.onerror = function (event) {
-    reportError("Control DataChannel error", event.error || event);
+    reportDataChannelError("Control DataChannel error", event.error || event);
   };
 }
 
@@ -1470,7 +1576,7 @@ function configureGamepadDataChannel(channel) {
     log("Gamepad DataChannel closed");
   };
   channel.onerror = function (event) {
-    reportError("Gamepad DataChannel error", event.error || event);
+    reportDataChannelError("Gamepad DataChannel error", event.error || event);
   };
 }
 

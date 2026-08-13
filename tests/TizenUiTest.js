@@ -65,6 +65,20 @@ assert.ok(appSource.includes("const gamepadUiNavigation = window.GamepadUiNaviga
   "gamepad UI navigation must use the shared application actions");
 assert.ok(appSource.includes("function goBackFromUiInput()"),
   "remote and gamepad Back input must share one route-aware action");
+assert.ok(html.includes('id="settings-selector-menu"'),
+  "Settings selectors require a deterministic TV menu");
+assert.ok(appSource.includes("function openSettingsSelector(select)"),
+  "gamepad A must open the shared Settings selector menu");
+assert.ok(appSource.includes("function closeSettingsSelector()"),
+  "Settings selector Back behavior must be deterministic");
+assert.ok(!appSource.includes("isEnter && document.activeElement.tagName !== \"SELECT\""),
+  "remote OK and gamepad A must share Settings selector activation");
+assert.ok(appSource.includes("function reportDataChannelError(context, error)"),
+  "DataChannel teardown errors require dedicated lifecycle handling");
+assert.ok(appSource.includes("if (sessionTeardownInProgress)"),
+  "expected DataChannel teardown errors must not become home-screen errors");
+assert.ok(appSource.includes("suspendGamepadInput(false);"),
+  "normal peer teardown must not send controller lifecycle traffic over a closing channel");
 
 function storage() {
   const values = new Map();
