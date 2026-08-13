@@ -887,6 +887,22 @@ function hideStreamMenu() {
   }
 }
 
+function handleGamepadStopShortcut() {
+  if (sessionState === "streaming") {
+    stopCurrentSession();
+  }
+}
+
+function handleMouseModeChanged(record, active) {
+  const controller = record.moonlightSlot === null
+    ? record.controllerId : record.moonlightSlot + 1;
+  showNotification(
+    active ? "Mouse emulation enabled" : "Mouse emulation disabled",
+    "Controller " + String(controller),
+    false
+  );
+}
+
 function toggleDiagnostics() {
   diagnosticsElement.hidden = !diagnosticsElement.hidden;
   diagnosticsButton.textContent = diagnosticsElement.hidden
@@ -1500,6 +1516,8 @@ const gamepadInputManager = new window.GamepadInputManager({
   diagnostics: gamepadDiagnostics,
   overlay: overlay.gamepad,
   mouseOverlay: document.getElementById("mouse-mode-overlay"),
+  onStopShortcut: handleGamepadStopShortcut,
+  onMouseModeChanged: handleMouseModeChanged,
 });
 
 const gamepadUiNavigation = window.GamepadUiNavigation.create({

@@ -79,6 +79,12 @@ assert.ok(appSource.includes("if (sessionTeardownInProgress)"),
   "expected DataChannel teardown errors must not become home-screen errors");
 assert.ok(appSource.includes("suspendGamepadInput(false);"),
   "normal peer teardown must not send controller lifecycle traffic over a closing channel");
+assert.ok(appSource.includes("function handleGamepadStopShortcut()"),
+  "the gamepad stop shortcut requires a shared application action");
+assert.ok(appSource.includes("if (sessionState === \"streaming\") {\n    stopCurrentSession();"),
+  "the gamepad stop shortcut must reuse the regular stop-session path");
+assert.ok(appSource.includes("function handleMouseModeChanged(record, active)"),
+  "mouse mode transitions must route through the existing toast system");
 
 function storage() {
   const values = new Map();

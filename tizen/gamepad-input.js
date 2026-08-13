@@ -168,6 +168,7 @@
       sequenceGaps: 0,
       staleStates: 0,
       mouseMode: false,
+      stopShortcutHeld: false,
       rumble: {
         strongMagnitude: 0,
         weakMagnitude: 0,
@@ -381,9 +382,30 @@
       record.staleStates = Number(message.staleStates) || 0;
       this.updateDiagnostics();
     } else if (message.type === "mouse-mode" && record) {
-      record.mouseMode = Boolean(message.active);
+      const active = Boolean(message.active);
+      const changed = record.mouseMode !== active;
+      record.mouseMode = active;
       this.updateMouseOverlay();
       this.updateDiagnostics();
+      if (changed && typeof this.options.onMouseModeChanged === "function") {
+        this.options.onMouseModeChanged(record, active);
+      }
+    }
+  };
+
+  GamepadInputManager.prototype.observeStopShortcut = function (record, state) {
+    const required = BUTTONS.LB | BUTTONS.RB | BUTTONS.BACK | BUTTONS.START;
+    const pressed = (state.buttons & required) === required;
+    if (!pressed) {
+      record.stopShortcutHeld = false;
+      return;
+    }
+    if (record.stopShortcutHeld) {
+      return;
+    }
+    record.stopShortcutHeld = true;
+    if (typeof this.options.onStopShortcut === "function") {
+      this.options.onStopShortcut(record);
     }
   };
 
@@ -426,6 +448,7 @@
       }
       manager.announce(record);
       const state = completeState(gamepad);
+      manager.observeStopShortcut(record, state);
       const fingerprint = JSON.stringify(state);
       if (fingerprint !== record.lastFingerprint
           || now - record.lastSendTime >= KEEPALIVE_INTERVAL_MS) {

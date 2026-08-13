@@ -68,6 +68,8 @@ const diagnostics = {
 const overlay = element();
 const mouseOverlay = element();
 const logs = [];
+const mouseModeChanges = [];
+const shortcutStops = [];
 
 const manager = new global.GamepadInputManager({
   controlChannel: function () { return control; },
@@ -78,6 +80,10 @@ const manager = new global.GamepadInputManager({
   diagnostics: diagnostics,
   overlay: overlay,
   mouseOverlay: mouseOverlay,
+  onStopShortcut: function (record) { shortcutStops.push(record.controllerId); },
+  onMouseModeChanged: function (record, active) {
+    mouseModeChanges.push({ controllerId: record.controllerId, active: active });
+  },
 });
 
 gamepads = [
@@ -183,6 +189,17 @@ manager.handleControlMessage(JSON.stringify({
   active: true,
 }));
 assert.strictEqual(mouseOverlay.hidden, false, "mouse mode overlay was not shown");
+assert.deepStrictEqual(mouseModeChanges, [{ controllerId: 1, active: true }],
+  "mouse mode activation did not emit one state-transition notification");
+manager.handleControlMessage(JSON.stringify({
+  v: 2,
+  type: "mouse-mode",
+  controllerId: 1,
+  controllerSlot: 0,
+  active: true,
+}));
+assert.strictEqual(mouseModeChanges.length, 1,
+  "unchanged mouse mode emitted a duplicate notification");
 manager.handleControlMessage(JSON.stringify({
   v: 2,
   type: "mouse-mode",
@@ -191,6 +208,51 @@ manager.handleControlMessage(JSON.stringify({
   active: false,
 }));
 assert.strictEqual(mouseOverlay.hidden, true, "mouse mode overlay was not hidden");
+assert.deepStrictEqual(mouseModeChanges, [
+  { controllerId: 1, active: true },
+  { controllerId: 1, active: false },
+], "mouse mode disable did not emit one state-transition notification");
+
+const shortcutRecord = manager.recordsById.get(1);
+const LB = 1 << 4;
+const RB = 1 << 5;
+const BACK = 1 << 6;
+const START = 1 << 7;
+manager.observeStopShortcut(shortcutRecord, { buttons: LB });
+manager.observeStopShortcut(shortcutRecord, { buttons: RB });
+manager.observeStopShortcut(shortcutRecord, { buttons: BACK | START });
+manager.observeStopShortcut(shortcutRecord, { buttons: LB | RB | BACK });
+manager.observeStopShortcut(shortcutRecord, { buttons: LB | RB | START });
+assert.strictEqual(shortcutStops.length, 0, "partial shortcut stopped the session");
+manager.observeStopShortcut(shortcutRecord, { buttons: LB | RB | BACK | START });
+assert.deepStrictEqual(shortcutStops, [1], "full shortcut did not stop once");
+manager.observeStopShortcut(shortcutRecord, { buttons: LB | RB | BACK | START });
+assert.deepStrictEqual(shortcutStops, [1], "held shortcut stopped repeatedly");
+manager.observeStopShortcut(shortcutRecord, { buttons: LB | RB | BACK });
+manager.observeStopShortcut(shortcutRecord, { buttons: LB | RB | BACK | START });
+assert.deepStrictEqual(shortcutStops, [1, 1], "shortcut latch did not reset after release");
+
+const inactiveStops = [];
+gamepads = [createGamepad(0, "Inactive shortcut test controller", null)];
+gamepads[0].buttons[4].pressed = true;
+gamepads[0].buttons[5].pressed = true;
+gamepads[0].buttons[8].pressed = true;
+gamepads[0].buttons[9].pressed = true;
+const inactiveManager = new global.GamepadInputManager({
+  controlChannel: function () { return control; },
+  gamepadChannel: function () { return input; },
+  isStreaming: function () { return false; },
+  log: function () {},
+  reportError: function () {},
+  diagnostics: diagnostics,
+  overlay: overlay,
+  mouseOverlay: mouseOverlay,
+  onStopShortcut: function () { inactiveStops.push(true); },
+});
+inactiveManager.resume();
+assert.strictEqual(inactiveStops.length, 0,
+  "shortcut was observed while no streaming session was active");
+inactiveManager.suspend(false);
 
 manager.suspend(true);
 assert.strictEqual(manager.connectedCount(), 0, "session cleanup retained controllers");
