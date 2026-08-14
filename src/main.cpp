@@ -988,6 +988,9 @@ private:
             status.sunshineDetected = true;
             status.sunshinePaired = detected.pairedHost.has_value()
                 && detected.serverInfo.pairStatus == 1;
+            if (!detected.serverInfo.hostname.empty()) {
+                status.gatewayName = detected.serverInfo.hostname;
+            }
             const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
             if (runningAppId != 0) {
                 status.runningAppId = std::to_string(runningAppId);

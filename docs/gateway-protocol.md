@@ -54,7 +54,7 @@ the Gateway identity or ProgramData directory, and does not claim Sunshine-side 
 Opening the WebSocket does not start Sunshine or WebRTC. The Gateway first sends:
 
 ```json
-{"version":1,"type":"gateway-status","gatewayName":"Moonlight WebRTC Gateway","sunshineDetected":true,"sunshinePaired":true,"sessionActive":false}
+{"version":1,"type":"gateway-status","gatewayName":"Sunshine-PC","sunshineDetected":true,"sunshinePaired":true,"sessionActive":false}
 ```
 
 It also sends `capabilities`. Protocol version 1 advertises explicit `videoModes` so the
