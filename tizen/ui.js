@@ -73,11 +73,9 @@
     this.gatewayScreen = document.getElementById("gateway-screen");
     this.applicationsScreen = document.getElementById("applications-screen");
     this.settingsScreen = document.getElementById("settings-screen");
-    this.gatewayCard = document.getElementById("gateway-card");
-    this.gatewayName = document.getElementById("gateway-name");
-    this.gatewayAddress = document.getElementById("gateway-address");
-    this.gatewayStatus = document.getElementById("gateway-card-status");
-    this.gatewayStatusDot = document.getElementById("gateway-status-dot");
+    this.gatewayGrid = document.getElementById("gateway-grid");
+    this.gatewayEmptyState = document.getElementById("gateway-empty-state");
+    this.activeGatewayName = "Moonlight Gateway";
     this.applicationsGrid = document.getElementById("applications-grid");
     this.topTitle = document.getElementById("top-title");
     this.topBackButton = document.getElementById("top-back-button");
@@ -101,11 +99,6 @@
 
   TizenUi.prototype.bindEvents = function () {
     const ui = this;
-    this.gatewayCard.addEventListener("click", function () {
-      if (!ui.gatewayCard.disabled) {
-        ui.showApplications();
-      }
-    });
     this.settingsButton.addEventListener("click", function () { ui.showSettings(); });
     this.topBackButton.addEventListener("click", function () { ui.goBack(); });
     this.categoryButtons.forEach(function (button) {
@@ -113,29 +106,87 @@
     });
   };
 
-  TizenUi.prototype.setGateway = function (gateway) {
-    const name = gateway.name || "Moonlight Gateway";
-    const state = gateway.state || "Connecting";
-    this.gatewayName.textContent = name;
-    this.gatewayAddress.textContent = gateway.address || "-";
-    this.gatewayStatus.textContent = state;
-    this.gatewayStatusDot.classList.toggle("is-connected", state === "Connected");
-    this.gatewayStatusDot.classList.toggle("is-error", state === "Disconnected" || state === "Unavailable");
-    this.gatewayCard.disabled = !gateway.selectable;
+  TizenUi.prototype.gatewayCard = function (gatewayId) {
+    return this.gatewayGrid.querySelector('[data-gateway-id="' + String(gatewayId) + '"]');
+  };
+
+  TizenUi.prototype.setActiveGateway = function (gateway) {
+    const name = gateway && gateway.name ? gateway.name : "Moonlight Gateway";
+    const address = gateway && gateway.host ? gateway.host : "-";
+    this.activeGatewayName = name;
     this.connectionGatewayName.querySelector("strong").textContent = name;
-    this.connectionGatewayAddress.querySelector("strong").textContent = gateway.address || "-";
+    this.connectionGatewayAddress.querySelector("strong").textContent = address;
+  };
+
+  TizenUi.prototype.renderGateways = function (gateways, activeGatewayId) {
+    const ui = this;
+    const entries = Array.isArray(gateways) ? gateways : [];
+    this.gatewayGrid.textContent = "";
+    this.gatewayEmptyState.hidden = entries.length > 0;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.id = "add-gateway-card";
+    add.className = "gateway-card gateway-add-card focusable";
+    add.innerHTML = '<span class="gateway-add-symbol" aria-hidden="true">+</span><span class="gateway-name">Add Gateway</span>';
+    add.addEventListener("click", function () { ui.options.onAddGateway(); });
+    this.gatewayGrid.appendChild(add);
+    entries.forEach(function (gateway) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "gateway-card focusable";
+      card.dataset.gatewayId = String(gateway.id);
+      card.dataset.gatewayState = String(gateway.state || "Offline");
+      card.setAttribute("aria-label", "Connect to " + String(gateway.name));
+      const icon = document.createElement("span");
+      icon.className = "gateway-icon";
+      icon.setAttribute("aria-hidden", "true");
+      const name = document.createElement("span");
+      name.className = "gateway-name";
+      name.textContent = String(gateway.name || ("Gateway " + gateway.host));
+      const statusLine = document.createElement("span");
+      statusLine.className = "gateway-status-line";
+      const dot = document.createElement("span");
+      dot.className = "status-dot";
+      dot.classList.toggle("is-connected", gateway.state === "Online");
+      dot.classList.toggle("is-error", gateway.state === "Offline");
+      const status = document.createElement("span");
+      status.textContent = String(gateway.state || "Offline");
+      statusLine.appendChild(dot);
+      statusLine.appendChild(status);
+      const address = document.createElement("span");
+      address.className = "gateway-address";
+      address.textContent = String(gateway.host || "-");
+      card.appendChild(icon);
+      card.appendChild(name);
+      card.appendChild(statusLine);
+      card.appendChild(address);
+      card.addEventListener("click", function () { ui.options.onGatewaySelected(gateway.id); });
+      ui.gatewayGrid.appendChild(card);
+    });
+
+    const preferred = this.gatewayCard(activeGatewayId)
+      || this.gatewayGrid.querySelector('[data-gateway-state="Online"]')
+      || this.gatewayGrid.querySelector("[data-gateway-id]")
+      || add;
+    Array.prototype.forEach.call(this.gatewayGrid.querySelectorAll("[data-default-focus]"), function (card) {
+      card.removeAttribute("data-default-focus");
+    });
+    preferred.dataset.defaultFocus = "true";
     this.ensureGatewayFocus();
   };
 
   TizenUi.prototype.ensureGatewayFocus = function () {
-    if (this.currentView !== "gateway" || !isFocusable(this.gatewayCard)) {
+    if (this.currentView !== "gateway") {
       return;
     }
     const active = document.activeElement;
     const contentElements = focusableElements(this.gatewayScreen);
     const topElements = this.topBarFocusableElements();
     if (contentElements.indexOf(active) < 0 && topElements.indexOf(active) < 0) {
-      setTimeout(function () { document.getElementById("gateway-card").focus(); }, 0);
+      const target = this.gatewayGrid.querySelector("[data-default-focus='true']");
+      if (target && isFocusable(target)) {
+        setTimeout(function () { target.focus(); }, 0);
+      }
     }
   };
 
@@ -251,7 +302,7 @@
     this.settingsButton.hidden = view === "settings";
     this.topTitle.textContent = view === "settings"
       ? "Settings"
-      : view === "applications" ? (this.gatewayName.textContent || "Gateway") : "Moonlight WebRTC Client";
+      : view === "applications" ? this.activeGatewayName : "Moonlight WebRTC Client";
     this.hintPrimary.textContent = view === "applications" ? "Launch" : "Select";
     this.hintBack.textContent = view === "gateway" ? "Exit" : "Back";
     this.focusDefault(view);
@@ -260,7 +311,7 @@
   TizenUi.prototype.showGateway = function () { this.showView("gateway"); };
 
   TizenUi.prototype.showApplications = function () {
-    if (this.gatewayCard.disabled) {
+    if (typeof this.options.hasActiveGateway === "function" && !this.options.hasActiveGateway()) {
       return;
     }
     this.showView("applications");
@@ -313,9 +364,7 @@
   TizenUi.prototype.focusDefault = function (view) {
     const container = view === "gateway" ? this.gatewayScreen
       : view === "applications" ? this.applicationsScreen : this.settingsScreen;
-    const preferred = view === "gateway" && isFocusable(this.gatewayCard)
-      ? this.gatewayCard
-      : container.querySelector("[data-default-focus='true']");
+    const preferred = container.querySelector("[data-default-focus='true']");
     const elements = focusableElements(container);
     const target = preferred && isFocusable(preferred) ? preferred : elements[0];
     if (target) {
@@ -463,7 +512,8 @@
       elements[next].focus();
       return true;
     }
-    if (this.currentView === "applications" && (direction === "left" || direction === "right")) {
+    if ((this.currentView === "applications" || this.currentView === "gateway")
+      && (direction === "left" || direction === "right")) {
       const index = elements.indexOf(active);
       const next = nextFocusableIndex(elements.length, index, direction === "right" ? 1 : -1);
       elements[next].focus();

@@ -1,9 +1,9 @@
-const SIGNALING_URL = "ws://192.168.0.69:8000";
 const GATEWAY_PROTOCOL_VERSION = 1;
 const GAMEPAD_PROTOCOL_VERSION = 1;
 const GAMEPAD_POLL_INTERVAL_MS = 1000 / 120;
 const GAMEPAD_KEEPALIVE_INTERVAL_MS = 250;
 const preferences = ClientPreferences.create();
+const gatewayStore = GatewayStore.create();
 
 const homeScreen = document.getElementById("home-screen");
 const streamingScreen = document.getElementById("streaming-screen");
@@ -32,6 +32,20 @@ const switchAppDialog = document.getElementById("switch-app-dialog");
 const switchAppMessage = document.getElementById("switch-app-message");
 const switchCancelButton = document.getElementById("switch-cancel-button");
 const switchConfirmButton = document.getElementById("switch-confirm-button");
+const gatewayEditorDialog = document.getElementById("gateway-editor-dialog");
+const gatewayEditorHeading = document.getElementById("gateway-editor-heading");
+const gatewayOctetButtons = Array.prototype.slice.call(document.querySelectorAll("[data-octet-index]"));
+const gatewayEditorError = document.getElementById("gateway-editor-error");
+const gatewayEditorCancelButton = document.getElementById("gateway-editor-cancel");
+const gatewayEditorConnectButton = document.getElementById("gateway-editor-connect");
+const gatewayContextMenu = document.getElementById("gateway-context-menu");
+const gatewayContextHeading = document.getElementById("gateway-context-heading");
+const gatewayEditButton = document.getElementById("gateway-edit-button");
+const gatewayRemoveButton = document.getElementById("gateway-remove-button");
+const gatewayRemoveDialog = document.getElementById("gateway-remove-dialog");
+const gatewayRemoveMessage = document.getElementById("gateway-remove-message");
+const gatewayRemoveCancelButton = document.getElementById("gateway-remove-cancel");
+const gatewayRemoveConfirmButton = document.getElementById("gateway-remove-confirm");
 const playButton = document.getElementById("play-button");
 const continueButton = document.getElementById("continue-button");
 const diagnosticsButton = document.getElementById("diagnostics-button");
@@ -153,6 +167,17 @@ let runningAppMenuOriginId = null;
 let switchTargetApplicationId = null;
 let currentGatewayName = "Moonlight Gateway";
 let savedPreferences = preferences.load();
+let savedGateways = gatewayStore.load();
+let activeGateway = null;
+let pendingGatewayValidation = null;
+let gatewayValidationTimer = null;
+let gatewayEditorState = null;
+let gatewayContextGatewayId = null;
+let gatewayRemoveGatewayId = null;
+let gatewayConnectionToken = 0;
+let openApplicationsAfterConnection = false;
+const gatewayRuntimeStates = new Map();
+const gatewayProbeIds = new Set();
 
 function log(message) {
   console.log(message);
@@ -190,24 +215,67 @@ function gatewayDisplayName(message) {
 }
 
 function gatewayAddress() {
-  try {
-    return new URL(SIGNALING_URL).hostname || "-";
-  } catch (error) {
-    return "-";
-  }
+  return activeGateway ? activeGateway.host : "-";
 }
 
-function updateGatewayCard(message) {
+function gatewayWebSocketUrl(gateway) {
+  return "ws://" + gateway.host + ":" + String(gateway.port);
+}
+
+function gatewayEntries() {
+  return savedGateways.map(function (gateway) {
+    return Object.assign({}, gateway, { state: gatewayRuntimeStates.get(gateway.id) || "Offline" });
+  });
+}
+
+function renderGateways() {
   if (!ui) {
     return;
   }
-  const state = gatewayConnected ? "Connected" : "Disconnected";
-  ui.setGateway({
-    name: gatewayDisplayName(message),
-    address: gatewayAddress(),
-    state: state,
-    selectable: gatewayConnected && sunshineReady && appsLoaded && sessionState === "idle",
-  });
+  ui.renderGateways(gatewayEntries(), activeGateway ? activeGateway.id : null);
+}
+
+function setGatewayRuntimeState(gatewayId, state) {
+  if (gatewayId) {
+    gatewayRuntimeStates.set(String(gatewayId), state);
+  }
+  renderGateways();
+}
+
+function resetGatewayData() {
+  sunshineReady = false;
+  appsLoaded = false;
+  applications = [];
+  runningAppId = null;
+  currentGatewayName = activeGateway ? activeGateway.name : "Moonlight Gateway";
+  appSelect.innerHTML = "";
+  appSelect.disabled = true;
+  const option = document.createElement("option");
+  option.textContent = "Waiting for Gateway...";
+  appSelect.appendChild(option);
+  if (artworkLoader) {
+    artworkLoader.setGatewayContext(activeGateway ? activeGateway.id : "");
+    artworkLoader.setApplications([]);
+  }
+  if (ui) {
+    ui.setActiveGateway(activeGateway);
+    ui.renderApplications([], "");
+  }
+}
+
+function refreshStoredGatewayName(message) {
+  if (!activeGateway) {
+    return;
+  }
+  const name = gatewayDisplayName(message);
+  const updated = gatewayStore.upsert(Object.assign({}, activeGateway, { name: name }));
+  if (updated) {
+    activeGateway = updated;
+    savedGateways = gatewayStore.list();
+    if (ui) {
+      ui.setActiveGateway(activeGateway);
+    }
+  }
 }
 
 function reportError(context, error) {
@@ -232,7 +300,7 @@ function reportDataChannelError(context, error) {
 function updatePlayAvailability() {
   playButton.disabled = !gatewayConnected || !sunshineReady || !appsLoaded
     || sessionState !== "idle" || hostOperationBusy;
-  updateGatewayCard();
+  renderGateways();
 }
 
 function sendGatewayMessage(message) {
@@ -251,23 +319,107 @@ function requestApplications() {
   }
 }
 
-function connectGateway() {
+function completeGatewayValidation(message) {
+  if (!activeGateway) {
+    return;
+  }
+  if (!pendingGatewayValidation) {
+    refreshStoredGatewayName(message);
+    return;
+  }
+  const pending = pendingGatewayValidation;
+  const candidate = Object.assign({}, activeGateway, { name: gatewayDisplayName(message) });
+  const saved = pending.mode === "edit"
+    ? gatewayStore.replace(pending.previousId, candidate)
+    : gatewayStore.upsert(candidate);
+  if (!saved) {
+    setGatewayEditorError("A Gateway with this address is already configured.");
+    clearGatewayValidationTimeout();
+    pendingGatewayValidation = null;
+    return;
+  }
+  activeGateway = saved;
+  savedGateways = gatewayStore.list();
+  clearGatewayValidationTimeout();
+  pendingGatewayValidation = null;
+  // The candidate does not have a persistent ID until it is saved.
+  setGatewayRuntimeState(activeGateway.id, "Online");
+  closeGatewayEditor();
+  if (ui) {
+    ui.setActiveGateway(activeGateway);
+  }
+  renderGateways();
+  setHomeMessage("Gateway connected. Loading Sunshine applications...", false);
+}
+
+function gatewayValidationFailed(message) {
+  if (!pendingGatewayValidation) {
+    return false;
+  }
+  setGatewayEditorError(message);
+  restoreGatewayEditorConnectAction();
+  clearGatewayValidationTimeout();
+  pendingGatewayValidation = null;
+  gatewayConnected = false;
+  sunshineReady = false;
+  activeGateway = gatewayEditorState && gatewayEditorState.previousGateway
+    ? gatewayEditorState.previousGateway : null;
+  if (ui) {
+    ui.setActiveGateway(activeGateway);
+  }
+  renderGateways();
+  return true;
+}
+
+function clearGatewayValidationTimeout() {
+  if (gatewayValidationTimer !== null) {
+    clearTimeout(gatewayValidationTimer);
+    gatewayValidationTimer = null;
+  }
+}
+
+function startGatewayValidationTimeout(host, gatewayId) {
+  clearGatewayValidationTimeout();
+  gatewayValidationTimer = setTimeout(function () {
+    if (!pendingGatewayValidation) {
+      return;
+    }
+    closeActiveGatewayConnection();
+    setGatewayRuntimeState(gatewayId, "Offline");
+    gatewayValidationFailed("Unable to connect to Gateway at " + host + " within 10 seconds.");
+  }, 10000);
+}
+
+function connectGateway(gateway) {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
 
+  if (!gateway) {
+    return;
+  }
+
+  const token = ++gatewayConnectionToken;
+  activeGateway = Object.assign({}, gateway);
+  resetGatewayData();
+  setGatewayRuntimeState(activeGateway.id, "Connecting");
+
   gatewayStateElement.textContent = "Connecting";
   setHomeMessage("Connecting to Gateway...", false);
   try {
-    socket = new WebSocket(SIGNALING_URL);
+    socket = new WebSocket(gatewayWebSocketUrl(activeGateway));
   } catch (error) {
-    reportError("WebSocket creation failed", error);
-    reconnectTimer = setTimeout(connectGateway, 2000);
+    const gatewayId = activeGateway.id;
+    gatewayValidationFailed("Unable to connect to Gateway at " + activeGateway.host);
+    setGatewayRuntimeState(gatewayId, "Offline");
     return;
   }
 
   socket.addEventListener("open", function () {
+    if (token !== gatewayConnectionToken) {
+      return;
+    }
     gatewayConnected = true;
     gatewayStateElement.textContent = "Connected";
     setHomeMessage("Connected. Loading Sunshine applications...", false);
@@ -278,6 +430,10 @@ function connectGateway() {
   });
 
   socket.addEventListener("close", function () {
+    if (token !== gatewayConnectionToken) {
+      return;
+    }
+    socket = null;
     gatewayConnected = false;
     sunshineReady = false;
     gatewayStateElement.textContent = "Disconnected";
@@ -286,20 +442,77 @@ function connectGateway() {
     sessionStateElement.textContent = "Idle";
     closePeerConnection();
     showHome();
+    if (gatewayValidationFailed("Unable to connect to Gateway at " + gatewayAddress())) {
+      return;
+    }
+    setGatewayRuntimeState(activeGateway ? activeGateway.id : "", "Offline");
     setHomeMessage("Gateway disconnected. Reconnecting...", true);
     updatePlayAvailability();
     log("Gateway WebSocket disconnected");
     showNotification("Gateway disconnected", "Reconnecting...", true);
-    reconnectTimer = setTimeout(connectGateway, 2000);
+    if (activeGateway) {
+      reconnectTimer = setTimeout(function () { connectGateway(activeGateway); }, 2000);
+    }
   });
 
   socket.addEventListener("error", function (event) {
-    reportError("WebSocket error", event.error || event);
+    if (token === gatewayConnectionToken && !pendingGatewayValidation) {
+      log("Gateway WebSocket error: " + errorMessage(event.error || event));
+    }
   });
 
   socket.addEventListener("message", function (event) {
-    handleGatewayMessage(event.data);
+    if (token === gatewayConnectionToken) {
+      handleGatewayMessage(event.data);
+    }
   });
+}
+
+function probeGateway(gateway) {
+  if (!gateway || (activeGateway && activeGateway.id === gateway.id) || gatewayProbeIds.has(gateway.id)) {
+    return;
+  }
+  gatewayProbeIds.add(gateway.id);
+  setGatewayRuntimeState(gateway.id, "Connecting");
+  let resolved = false;
+  let probe = null;
+  let timeout = null;
+  const complete = function (state) {
+    if (resolved) {
+      return;
+    }
+    resolved = true;
+    gatewayProbeIds.delete(gateway.id);
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+    setGatewayRuntimeState(gateway.id, state);
+    if (probe && probe.readyState === WebSocket.OPEN) {
+      probe.close();
+    }
+  };
+  try {
+    probe = new WebSocket(gatewayWebSocketUrl(gateway));
+    timeout = setTimeout(function () { complete("Offline"); }, 2500);
+    probe.addEventListener("message", function (event) {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.version === GATEWAY_PROTOCOL_VERSION && message.type === "gateway-status") {
+          complete("Online");
+        }
+      } catch (error) {
+        complete("Offline");
+      }
+    });
+    probe.addEventListener("error", function () { complete("Offline"); });
+    probe.addEventListener("close", function () { complete("Offline"); });
+  } catch (error) {
+    complete("Offline");
+  }
+}
+
+function probeSavedGateways() {
+  savedGateways.forEach(probeGateway);
 }
 
 async function handleGatewayMessage(text) {
@@ -355,7 +568,13 @@ function handleGatewayStatus(message) {
   if (Object.prototype.hasOwnProperty.call(message, "runningAppId")) {
     setRunningApplication(message.runningAppId);
   }
-  updateGatewayCard(message);
+  if (activeGateway) {
+    setGatewayRuntimeState(activeGateway.id, "Online");
+    completeGatewayValidation(message);
+    if (ui) {
+      ui.setActiveGateway(activeGateway);
+    }
+  }
   updatePlayAvailability();
 }
 
@@ -549,6 +768,10 @@ function applyApplications(nextApplications) {
   }
   if (artworkLoader) {
     artworkLoader.setApplications(applications);
+  }
+  if (openApplicationsAfterConnection && ui) {
+    openApplicationsAfterConnection = false;
+    ui.showApplications();
   }
 }
 
@@ -954,6 +1177,7 @@ function showHome(view) {
       ui.showApplications();
     } else {
       ui.showGateway();
+      probeSavedGateways();
     }
   }
 }
@@ -1007,6 +1231,264 @@ function focusFirstHomeControl() {
   if (!homeScreen.hidden && ui) {
     ui.focusDefault(ui.currentView);
   }
+}
+
+function closeActiveGatewayConnection() {
+  gatewayConnectionToken += 1;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (socket) {
+    try {
+      socket.close();
+    } catch (error) {
+      log("Gateway close unavailable: " + errorMessage(error));
+    }
+  }
+  socket = null;
+  gatewayConnected = false;
+}
+
+function activateGateway(gatewayId) {
+  const gateway = gatewayStore.find(gatewayId);
+  if (!gateway || sessionState !== "idle") {
+    return;
+  }
+  if (activeGateway && activeGateway.id === gateway.id && gatewayConnected && appsLoaded) {
+    ui.showApplications();
+    return;
+  }
+  closeActiveGatewayConnection();
+  activeGateway = gateway;
+  openApplicationsAfterConnection = true;
+  connectGateway(gateway);
+}
+
+function gatewayEditorIsOpen() {
+  return !gatewayEditorDialog.hidden;
+}
+
+function gatewayContextMenuIsOpen() {
+  return !gatewayContextMenu.hidden;
+}
+
+function gatewayRemoveDialogIsOpen() {
+  return !gatewayRemoveDialog.hidden;
+}
+
+function octetsForHost(host) {
+  return GatewayIpv4.parse(host);
+}
+
+function updateGatewayEditor() {
+  if (!gatewayEditorState) {
+    return;
+  }
+  gatewayOctetButtons.forEach(function (button, index) {
+    button.textContent = String(gatewayEditorState.octets[index]);
+  });
+}
+
+function setGatewayEditorError(message) {
+  gatewayEditorError.textContent = message || "";
+  gatewayEditorError.hidden = !message;
+}
+
+function openGatewayEditor(mode, gatewayId) {
+  const previousGateway = mode === "edit" ? gatewayStore.find(gatewayId) : null;
+  gatewayEditorState = {
+    mode: mode,
+    previousId: previousGateway ? previousGateway.id : null,
+    previousGateway: previousGateway,
+    octets: octetsForHost(previousGateway ? previousGateway.host : ""),
+    selectedOctet: 0,
+  };
+  gatewayEditorHeading.textContent = mode === "edit" ? "Edit Gateway" : "Add Gateway";
+  gatewayEditorConnectButton.textContent = mode === "edit" ? "Save / Connect" : "Connect";
+  setGatewayEditorError("");
+  updateGatewayEditor();
+  gatewayEditorDialog.hidden = false;
+  gatewayOctetButtons[0].focus();
+}
+
+function closeGatewayEditor() {
+  if (!gatewayEditorIsOpen()) {
+    return false;
+  }
+  gatewayEditorDialog.hidden = true;
+  const previousId = gatewayEditorState && gatewayEditorState.previousId;
+  gatewayEditorState = null;
+  clearGatewayValidationTimeout();
+  pendingGatewayValidation = null;
+  if (ui && previousId) {
+    const card = ui.gatewayCard(previousId);
+    if (card) {
+      card.focus();
+    }
+  }
+  return true;
+}
+
+function selectedGatewayOctetIndex() {
+  const active = document.activeElement;
+  const index = gatewayOctetButtons.indexOf(active);
+  return index >= 0 ? index : (gatewayEditorState ? gatewayEditorState.selectedOctet : 0);
+}
+
+function focusGatewayOctet(index) {
+  const normalized = Math.max(0, Math.min(gatewayOctetButtons.length - 1, index));
+  gatewayEditorState.selectedOctet = normalized;
+  gatewayOctetButtons[normalized].focus();
+}
+
+function changeGatewayOctet(direction) {
+  const index = selectedGatewayOctetIndex();
+  const value = gatewayEditorState.octets[index];
+  gatewayEditorState.octets[index] = GatewayIpv4.adjust(value, direction);
+  updateGatewayEditor();
+  focusGatewayOctet(index);
+}
+
+function navigateGatewayEditor(direction) {
+  if (!gatewayEditorState) {
+    return false;
+  }
+  const active = document.activeElement;
+  const octetIndex = gatewayOctetButtons.indexOf(active);
+  if (octetIndex >= 0) {
+    gatewayEditorState.selectedOctet = octetIndex;
+    if (direction === "left") {
+      if (octetIndex > 0) { focusGatewayOctet(octetIndex - 1); return true; }
+      return false;
+    }
+    if (direction === "right") {
+      if (octetIndex + 1 < gatewayOctetButtons.length) { focusGatewayOctet(octetIndex + 1); return true; }
+      return false;
+    }
+    if (direction === "up") { changeGatewayOctet(1); return true; }
+    if (direction === "down") { gatewayEditorCancelButton.focus(); return true; }
+  }
+  if (active === gatewayEditorCancelButton || active === gatewayEditorConnectButton) {
+    if (direction === "left" || direction === "right") {
+      (active === gatewayEditorCancelButton ? gatewayEditorConnectButton : gatewayEditorCancelButton).focus();
+      return true;
+    }
+    if (direction === "up") {
+      focusGatewayOctet(gatewayEditorState.selectedOctet);
+      return true;
+    }
+  }
+  return false;
+}
+
+function connectGatewayFromEditor() {
+  if (!gatewayEditorState || pendingGatewayValidation) {
+    return;
+  }
+  const host = GatewayIpv4.format(gatewayEditorState.octets);
+  const candidate = {
+    host: host,
+    port: GatewayStore.DEFAULT_PORT,
+    name: gatewayEditorState.previousGateway ? gatewayEditorState.previousGateway.name : "Gateway " + host,
+  };
+  pendingGatewayValidation = {
+    mode: gatewayEditorState.mode,
+    previousId: gatewayEditorState.previousId,
+  };
+  setGatewayEditorError("");
+  gatewayEditorConnectButton.disabled = true;
+  gatewayEditorConnectButton.textContent = "Connecting...";
+  closeActiveGatewayConnection();
+  openApplicationsAfterConnection = false;
+  startGatewayValidationTimeout(host, host + ":" + String(candidate.port));
+  connectGateway(candidate);
+}
+
+function restoreGatewayEditorConnectAction() {
+  if (!gatewayEditorState) {
+    return;
+  }
+  gatewayEditorConnectButton.disabled = false;
+  gatewayEditorConnectButton.textContent = gatewayEditorState.mode === "edit" ? "Save / Connect" : "Connect";
+}
+
+function closeGatewayContextMenu() {
+  if (!gatewayContextMenuIsOpen()) {
+    return false;
+  }
+  gatewayContextMenu.hidden = true;
+  const gatewayId = gatewayContextGatewayId;
+  gatewayContextGatewayId = null;
+  if (ui && gatewayId) {
+    const card = ui.gatewayCard(gatewayId);
+    if (card) { card.focus(); }
+  }
+  return true;
+}
+
+function openGatewayContextMenu() {
+  if (!ui || ui.currentView !== "gateway" || sessionState !== "idle") {
+    return false;
+  }
+  const active = document.activeElement;
+  const gatewayId = active && active.dataset ? active.dataset.gatewayId : null;
+  const gateway = gatewayStore.find(gatewayId);
+  if (!gateway) {
+    return false;
+  }
+  gatewayContextGatewayId = gateway.id;
+  gatewayContextHeading.textContent = gateway.name;
+  gatewayContextMenu.hidden = false;
+  gatewayEditButton.focus();
+  return true;
+}
+
+function openGatewayRemoveDialog() {
+  const gateway = gatewayStore.find(gatewayContextGatewayId);
+  if (!gateway) {
+    return false;
+  }
+  gatewayContextMenu.hidden = true;
+  gatewayRemoveGatewayId = gateway.id;
+  gatewayRemoveMessage.textContent = "Remove " + gateway.name + "?";
+  gatewayRemoveDialog.hidden = false;
+  gatewayRemoveCancelButton.focus();
+  return true;
+}
+
+function closeGatewayRemoveDialog() {
+  if (!gatewayRemoveDialogIsOpen()) {
+    return false;
+  }
+  gatewayRemoveDialog.hidden = true;
+  const gatewayId = gatewayRemoveGatewayId;
+  gatewayRemoveGatewayId = null;
+  if (ui && gatewayId) {
+    const card = ui.gatewayCard(gatewayId);
+    if (card) { card.focus(); }
+  }
+  return true;
+}
+
+function removeGateway() {
+  const gatewayId = gatewayRemoveGatewayId;
+  if (!gatewayId || sessionState !== "idle") {
+    return;
+  }
+  if (activeGateway && activeGateway.id === gatewayId) {
+    closeActiveGatewayConnection();
+    activeGateway = null;
+    resetGatewayData();
+  }
+  gatewayStore.remove(gatewayId);
+  savedGateways = gatewayStore.list();
+  gatewayRuntimeStates.delete(gatewayId);
+  gatewayRemoveDialog.hidden = true;
+  gatewayRemoveGatewayId = null;
+  renderGateways();
+  setHomeMessage(savedGateways.length ? "Gateway removed." : "Add a Gateway to get started.", false);
+  probeSavedGateways();
 }
 
 function applicationById(applicationId) {
@@ -1273,6 +1755,23 @@ function isGameplayInputActive() {
 }
 
 function navigateUi(direction) {
+  if (gatewayEditorIsOpen()) {
+    return navigateGatewayEditor(direction);
+  }
+  if (gatewayContextMenuIsOpen()) {
+    if (direction === "up" || direction === "down") {
+      moveFocus(gatewayContextMenu, direction === "down" ? 1 : -1);
+      return true;
+    }
+    return false;
+  }
+  if (gatewayRemoveDialogIsOpen()) {
+    if (direction === "up" || direction === "down") {
+      moveFocus(gatewayRemoveDialog, direction === "down" ? 1 : -1);
+      return true;
+    }
+    return false;
+  }
   if (runningAppMenuIsOpen()) {
     if (direction === "up" || direction === "down") {
       moveFocus(runningAppMenu, direction === "down" ? 1 : -1);
@@ -1306,6 +1805,40 @@ function navigateUi(direction) {
 
 function activateFocusedControl() {
   const active = document.activeElement;
+  if (gatewayEditorIsOpen()) {
+    if (active === gatewayEditorCancelButton) {
+      closeGatewayEditor();
+      return true;
+    }
+    if (active === gatewayEditorConnectButton) {
+      connectGatewayFromEditor();
+      return true;
+    }
+    return gatewayOctetButtons.indexOf(active) >= 0;
+  }
+  if (gatewayContextMenuIsOpen()) {
+    if (active === gatewayEditButton) {
+      const gatewayId = gatewayContextGatewayId;
+      closeGatewayContextMenu();
+      openGatewayEditor("edit", gatewayId);
+      return true;
+    }
+    if (active === gatewayRemoveButton) {
+      return openGatewayRemoveDialog();
+    }
+    return false;
+  }
+  if (gatewayRemoveDialogIsOpen()) {
+    if (active === gatewayRemoveCancelButton) {
+      closeGatewayRemoveDialog();
+      return true;
+    }
+    if (active === gatewayRemoveConfirmButton) {
+      removeGateway();
+      return true;
+    }
+    return false;
+  }
   if (runningAppMenuIsOpen()) {
     if (active === resumeSessionButton) {
       resumeRunningApplication();
@@ -1346,6 +1879,16 @@ function activateFocusedControl() {
 }
 
 function goBackFromUiInput() {
+  if (gatewayEditorIsOpen()) {
+    restoreGatewayEditorConnectAction();
+    return closeGatewayEditor();
+  }
+  if (gatewayContextMenuIsOpen()) {
+    return closeGatewayContextMenu();
+  }
+  if (gatewayRemoveDialogIsOpen()) {
+    return closeGatewayRemoveDialog();
+  }
   if (closeRunningAppMenu() || closeSwitchAppDialog()) {
     return true;
   }
@@ -1379,6 +1922,9 @@ function goBackFromUiInput() {
 }
 
 function openFocusedApplicationMenu() {
+  if (ui && ui.currentView === "gateway") {
+    return openGatewayContextMenu();
+  }
   return openRunningAppMenu();
 }
 
@@ -2031,7 +2577,30 @@ window.addEventListener("unhandledrejection", function (event) {
 
 ui = TizenUi.create({
   onApplicationSelected: launchApplication,
+  onGatewaySelected: activateGateway,
+  onAddGateway: function () { openGatewayEditor("add"); },
+  hasActiveGateway: function () { return Boolean(activeGateway && gatewayConnected); },
 });
+gatewayOctetButtons.forEach(function (button, index) {
+  button.addEventListener("click", function () {
+    if (gatewayEditorState) {
+      focusGatewayOctet(index);
+    }
+  });
+});
+gatewayEditorCancelButton.addEventListener("click", function () {
+  restoreGatewayEditorConnectAction();
+  closeGatewayEditor();
+});
+gatewayEditorConnectButton.addEventListener("click", connectGatewayFromEditor);
+gatewayEditButton.addEventListener("click", function () {
+  const gatewayId = gatewayContextGatewayId;
+  closeGatewayContextMenu();
+  openGatewayEditor("edit", gatewayId);
+});
+gatewayRemoveButton.addEventListener("click", openGatewayRemoveDialog);
+gatewayRemoveCancelButton.addEventListener("click", closeGatewayRemoveDialog);
+gatewayRemoveConfirmButton.addEventListener("click", removeGateway);
 artworkLoader = ApplicationArtworkLoader.create({
   requestArtwork: function (appId) {
     try {
@@ -2047,12 +2616,7 @@ artworkLoader = ApplicationArtworkLoader.create({
     }
   },
 });
-ui.setGateway({
-  name: "Moonlight Gateway",
-  address: gatewayAddress(),
-  state: "Connecting",
-  selectable: false,
-});
+ui.setActiveGateway(null);
 ui.setSunshineState("Unknown");
 ui.setWebRtcState("Idle");
 
@@ -2062,4 +2626,5 @@ gamepadInputManager.updateDiagnostics();
 syncGamepadUi();
 showHome();
 gamepadUiNavigation.start();
-connectGateway();
+renderGateways();
+probeSavedGateways();

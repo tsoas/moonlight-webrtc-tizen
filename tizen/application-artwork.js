@@ -24,7 +24,22 @@
     this.pending = [];
     this.pendingIds = new Set();
     this.inFlight = null;
+    this.gatewayContext = "";
   }
+
+  ApplicationArtworkLoader.prototype.setGatewayContext = function (gatewayContext) {
+    const nextContext = String(gatewayContext || "");
+    if (this.gatewayContext === nextContext) {
+      return;
+    }
+    this.gatewayContext = nextContext;
+    this.currentIds.clear();
+    this.loaded.clear();
+    this.unavailable.clear();
+    this.pending = [];
+    this.pendingIds.clear();
+    this.inFlight = null;
+  };
 
   ApplicationArtworkLoader.prototype.setApplications = function (applications) {
     const loader = this;

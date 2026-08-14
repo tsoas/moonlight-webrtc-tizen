@@ -7,6 +7,8 @@ const path = require("path");
 global.window = global;
 require("../tizen/ui.js");
 require("../tizen/preferences.js");
+require("../tizen/gateway-store.js");
+require("../tizen/gateway-ipv4.js");
 require("../tizen/application-artwork.js");
 
 const testing = global.TizenUi.testing;
@@ -25,7 +27,7 @@ assert.strictEqual(testing.nextNavigationZone("top", "down", true), "content",
   "DOWN from the top application bar must return to content");
 assert.strictEqual(testing.nextNavigationZone("content", "up", false), "content",
   "navigation must not invent a missing top-bar focus target");
-assert.strictEqual(testing.readableGatewayAddress("ws://192.168.0.69:8000"), "192.168.0.69",
+assert.strictEqual(testing.readableGatewayAddress("ws://10.0.0.4:8000"), "10.0.0.4",
   "the gateway address should be derived from the real signaling URL");
 assert.strictEqual(testing.readableGatewayAddress("not a URL"), "-",
   "invalid gateway URLs must not fabricate an address");
@@ -53,6 +55,12 @@ assert.ok(html.includes('id="stream-menu"') && html.includes('id="diagnostics-bu
 assert.ok(html.includes('id="toast-region"'), "notification region is missing");
 assert.ok(html.includes('src="application-artwork.js"'),
   "the Applications screen must load the Gateway artwork transport");
+assert.ok(html.includes('src="gateway-store.js"') && html.includes('src="gateway-ipv4.js"'),
+  "manual Gateway setup requires persisted Gateway storage and the IPv4 editor");
+assert.ok(html.includes('id="add-gateway-card"') === false && html.includes('id="gateway-grid"'),
+  "the Gateway list must be rendered from persisted data rather than a hard-coded card");
+assert.ok(html.includes('id="gateway-editor-dialog"') && html.includes('data-octet-index="3"'),
+  "manual Gateway setup requires the four-octet IPv4 editor");
 assert.ok(uiSource.includes("this.ensureGatewayFocus();"),
   "the first selectable gateway must receive initial focus when it becomes available");
 assert.ok(uiSource.includes("TizenUi.prototype.focusSettingsCategory"),
@@ -119,9 +127,29 @@ assert.ok(appSource.includes("hostOperationBusy"),
   "host operations must prevent duplicate UI actions while Sunshine reconciles state");
 assert.ok(appSource.includes('showHome("applications");'),
   "normal session shutdown must return to the application list");
+assert.ok(!appSource.includes("192.168.0.69"),
+  "the Tizen runtime must not retain a developer Gateway fallback");
+assert.ok(appSource.includes("GatewayStore.DEFAULT_PORT"),
+  "manual Gateway setup must reuse the fixed existing Gateway port");
+assert.ok(appSource.includes("function activateGateway(gatewayId)"),
+  "Gateway selection must establish the selected active Gateway context");
+assert.ok(appSource.includes("function probeSavedGateways()"),
+  "saved Gateway state must be refreshed asynchronously");
+assert.ok(appSource.includes("function startGatewayValidationTimeout(host, gatewayId)")
+  && appSource.includes("within 10 seconds"),
+  "manual Gateway validation must stop after a bounded ten second timeout");
+assert.ok(appSource.includes('setGatewayRuntimeState(activeGateway.id, "Online")'),
+  "a newly saved Gateway must receive its persistent Online runtime state");
+assert.ok(appSource.includes("function openGatewayContextMenu()")
+  && appSource.includes("function openGatewayEditor(mode, gatewayId)"),
+  "saved Gateways require the edit/remove context actions");
+assert.ok(uiSource.includes('const preferred = container.querySelector("[data-default-focus=\'true\']");'),
+  "Gateway focus restoration must use the rendered default card rather than the obsolete singleton card");
+assert.ok(uiSource.includes('this.currentView === "applications" || this.currentView === "gateway"'),
+  "Gateway cards and Add Gateway must share horizontal focus navigation");
 assert.ok(uiSource.includes("application-running"),
   "running applications require a non-focusable visual indicator");
-assert.ok(uiSource.indexOf('card.appendChild(art);') < uiSource.indexOf('card.appendChild(name);'),
+assert.ok(uiSource.indexOf('card.appendChild(art);') < uiSource.lastIndexOf('card.appendChild(name);'),
   "application artwork must render before its title in the same focusable item");
 assert.ok(uiCss.includes("aspect-ratio:2 / 3"),
   "application artwork tiles must use stable portrait geometry");

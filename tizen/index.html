@@ -16,13 +16,10 @@
     </header>
 
     <section id="gateway-screen" class="page-screen" aria-labelledby="gateway-heading">
-      <h1 id="gateway-heading">Gateway</h1>
-      <div class="gateway-grid"><button id="gateway-card" class="gateway-card focusable" type="button" disabled>
-        <span class="gateway-icon" aria-hidden="true"></span><span id="gateway-name" class="gateway-name">Moonlight Gateway</span>
-        <span class="gateway-status-line"><span id="gateway-status-dot" class="status-dot"></span><span id="gateway-card-status">Connecting</span></span>
-        <span id="gateway-address" class="gateway-address">-</span>
-      </button></div>
-      <p id="home-message" class="page-message" aria-live="polite">Connecting to Gateway...</p>
+      <h1 id="gateway-heading">Gateways</h1>
+      <div id="gateway-grid" class="gateway-grid"></div>
+      <p id="gateway-empty-state" class="page-message" hidden>No Gateway configured. Add a Gateway to connect to your Moonlight WebRTC Gateway.</p>
+      <p id="home-message" class="page-message" aria-live="polite"></p>
       <dl class="visually-hidden" aria-live="polite"><div><dt>Gateway</dt><dd id="gateway-state">Disconnected</dd></div><div><dt>Sunshine</dt><dd id="sunshine-state">Unknown</dd></div><div><dt>Session</dt><dd id="session-state">Idle</dd></div></dl>
     </section>
 
@@ -72,6 +69,9 @@
     <div id="settings-selector-menu" class="settings-selector-menu" hidden aria-label="Setting choices"><section class="settings-selector-panel"><h2 id="settings-selector-heading">Select value</h2><div id="settings-selector-options" class="settings-selector-options"></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Back</p></section></div>
     <div id="running-app-menu" class="settings-selector-menu" hidden aria-label="Running application menu"><section class="settings-selector-panel"><h2 id="running-app-menu-heading">Running application</h2><div class="settings-selector-options"><button id="resume-session-button" class="settings-selector-option focusable" type="button">Resume session</button><button id="stop-host-session-button" class="settings-selector-option menu-button-danger focusable" type="button">Stop session</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Back</p></section></div>
     <div id="switch-app-dialog" class="settings-selector-menu" hidden aria-label="Switch running application"><section class="settings-selector-panel"><h2>Application already running</h2><p id="switch-app-message" class="session-dialog-message"></p><div class="settings-selector-options"><button id="switch-cancel-button" class="settings-selector-option focusable" type="button">Cancel</button><button id="switch-confirm-button" class="settings-selector-option menu-button-danger focusable" type="button">Stop &amp; Launch</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Cancel</p></section></div>
+    <div id="gateway-editor-dialog" class="settings-selector-menu" hidden aria-label="Gateway address editor"><section class="settings-selector-panel gateway-editor-panel"><h2 id="gateway-editor-heading">Add Gateway</h2><p>IP address</p><div id="gateway-octets" class="gateway-octets"><button class="gateway-octet focusable" type="button" data-octet-index="0">192</button><span>.</span><button class="gateway-octet focusable" type="button" data-octet-index="1">168</button><span>.</span><button class="gateway-octet focusable" type="button" data-octet-index="2">0</button><span>.</span><button class="gateway-octet focusable" type="button" data-octet-index="3">0</button></div><p class="gateway-editor-hint">&#8593; &#8595; Change value &nbsp;&nbsp; &#8592; &#8594; Select segment</p><p id="gateway-editor-error" class="session-dialog-message" hidden></p><div class="settings-selector-options gateway-editor-actions"><button id="gateway-editor-cancel" class="settings-selector-option focusable" type="button">Cancel</button><button id="gateway-editor-connect" class="settings-selector-option focusable" type="button">Connect</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Cancel</p></section></div>
+    <div id="gateway-context-menu" class="settings-selector-menu" hidden aria-label="Gateway menu"><section class="settings-selector-panel"><h2 id="gateway-context-heading">Gateway</h2><div class="settings-selector-options"><button id="gateway-edit-button" class="settings-selector-option focusable" type="button">Edit Gateway</button><button id="gateway-remove-button" class="settings-selector-option menu-button-danger focusable" type="button">Remove Gateway</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Back</p></section></div>
+    <div id="gateway-remove-dialog" class="settings-selector-menu" hidden aria-label="Remove Gateway"><section class="settings-selector-panel"><h2>Remove Gateway?</h2><p id="gateway-remove-message" class="session-dialog-message"></p><div class="settings-selector-options"><button id="gateway-remove-cancel" class="settings-selector-option focusable" type="button">Cancel</button><button id="gateway-remove-confirm" class="settings-selector-option menu-button-danger focusable" type="button">Remove</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Cancel</p></section></div>
     <footer id="control-hints" class="control-hints" aria-label="Remote control hints"><span><kbd>OK</kbd><span id="hint-primary">Select</span></span><span><kbd class="back-key">&#8592;</kbd><span id="hint-back">Back</span></span></footer>
   </main>
 
@@ -91,6 +91,8 @@
   <script src="gamepad-input.js"></script>
   <script src="gamepad-ui-navigation.js"></script>
   <script src="preferences.js"></script>
+  <script src="gateway-store.js"></script>
+  <script src="gateway-ipv4.js"></script>
   <script src="application-artwork.js"></script>
   <script src="ui.js"></script>
   <script src="app.js"></script>

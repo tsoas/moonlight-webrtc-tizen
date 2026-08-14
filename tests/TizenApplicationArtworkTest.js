@@ -46,4 +46,18 @@ assert.ok(exactLoader.handleResponse({
 assert.deepStrictEqual(exactIds, ["4294967295", "4294967296"],
   "distinct opaque Sunshine IDs must not collide in lazy artwork loading");
 
+const gatewayScopedRequests = [];
+const gatewayScopedLoader = global.ApplicationArtworkLoader.create({
+  requestArtwork: function (appId) { gatewayScopedRequests.push(appId); },
+  onArtwork: function () {},
+});
+gatewayScopedLoader.setGatewayContext("192.168.0.69:8000");
+gatewayScopedLoader.setApplications([{ id: "1", title: "Desktop" }]);
+assert.ok(gatewayScopedLoader.handleResponse({ appId: "1", available: false }),
+  "the first Gateway artwork response must complete");
+gatewayScopedLoader.setGatewayContext("192.168.1.20:8000");
+gatewayScopedLoader.setApplications([{ id: "1", title: "Desktop" }]);
+assert.deepStrictEqual(gatewayScopedRequests, ["1", "1"],
+  "switching Gateway must not reuse artwork cache entries from a matching app ID");
+
 console.log("Tizen application artwork tests passed");
