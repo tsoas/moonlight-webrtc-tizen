@@ -8,6 +8,7 @@
                        package="MlWrtcTst1"
                        required_version="5.5"/>
     <content src="index.html"/>
+    <icon src="assets/moonlight-icon.png"/>
     <name>Moonlight WebRTC Client</name>
     <access origin="*" subdomains="true"/>
     <tizen:privilege name="http://tizen.org/privilege/internet"/>

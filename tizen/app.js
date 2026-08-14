@@ -605,7 +605,7 @@ function handleSessionStatus(message) {
   } else if (message.state === "idle") {
     closePeerConnection();
     currentSessionId = 0;
-    showHome();
+    showHome("applications");
     setHomeMessage("Stream disconnected. Running applications remain available.", false);
     showNotification("Streaming disconnected", "Choose an application to resume or launch.", false);
     requestApplications();
@@ -942,7 +942,7 @@ function showStreaming() {
   startPlayback();
 }
 
-function showHome() {
+function showHome(view) {
   homeScreen.hidden = false;
   streamingScreen.hidden = true;
   streamMenu.hidden = true;
@@ -950,7 +950,11 @@ function showHome() {
   diagnosticsButton.textContent = "Show statistics";
   updatePlayAvailability();
   if (ui) {
-    ui.showGateway();
+    if (view === "applications") {
+      ui.showApplications();
+    } else {
+      ui.showGateway();
+    }
   }
 }
 

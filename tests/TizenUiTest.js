@@ -117,6 +117,8 @@ assert.ok(appSource.includes("if (String(runningAppId) === String(applicationId)
   "selecting the current Sunshine application must resume rather than relaunch");
 assert.ok(appSource.includes("hostOperationBusy"),
   "host operations must prevent duplicate UI actions while Sunshine reconciles state");
+assert.ok(appSource.includes('showHome("applications");'),
+  "normal session shutdown must return to the application list");
 assert.ok(uiSource.includes("application-running"),
   "running applications require a non-focusable visual indicator");
 assert.ok(uiSource.indexOf('card.appendChild(art);') < uiSource.indexOf('card.appendChild(name);'),
