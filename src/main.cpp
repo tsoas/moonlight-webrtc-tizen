@@ -125,6 +125,8 @@ struct ProgramOptions {
     bool pair = false;
     ProgramHostMode hostMode = ProgramHostMode::Console;
     std::optional<std::filesystem::path> dataDirectory;
+    bool dataDirectoryExplicit = false;
+    std::optional<std::filesystem::path> migrationSourceDirectory;
 };
 
 ProgramOptions parseProgramOptions(int argc, char** argv)
@@ -148,30 +150,42 @@ ProgramOptions parseProgramOptions(int argc, char** argv)
             options.hostMode = ProgramHostMode::Service;
         } else if (argument.starts_with("--data-dir=") && argument.size() > 11) {
             options.dataDirectory = std::filesystem::path(argument.substr(11));
+            options.dataDirectoryExplicit = true;
+        } else if (argument.starts_with("--migrate-data-from=") && argument.size() > 20) {
+            options.migrationSourceDirectory = std::filesystem::path(argument.substr(20));
         } else {
             throw std::invalid_argument(
                 "Usage: moonlight_webrtc [--source=test|--source=moonlight] "
                 "[--host=<host>] [--app=<name>] [--pair] [--console|--service] "
-                "[--data-dir=<path>]");
+                "[--data-dir=<path>] [--migrate-data-from=<path>]");
         }
     }
 
     if (options.sourceMode != MediaSourceMode::Moonlight
-        && (options.host || options.application != "Desktop" || options.pair || options.dataDirectory)) {
+        && (options.host || options.application != "Desktop" || options.pair || options.dataDirectory
+            || options.migrationSourceDirectory)) {
         throw std::invalid_argument(
             "--host, --app, --pair, and --data-dir require --source=moonlight");
     }
     if (options.pair && options.hostMode == ProgramHostMode::Service) {
         throw std::invalid_argument("--pair cannot run as a Windows service");
     }
+    if (options.migrationSourceDirectory) {
+        if (options.sourceMode != MediaSourceMode::Moonlight || !options.dataDirectory) {
+            throw std::invalid_argument(
+                "--migrate-data-from requires --source=moonlight and an explicit --data-dir");
+        }
+        if (options.hostMode == ProgramHostMode::Service || options.pair || options.host) {
+            throw std::invalid_argument(
+                "--migrate-data-from cannot be combined with --service, --pair, or --host");
+        }
+    }
     if (options.hostMode == ProgramHostMode::Service) {
         if (options.sourceMode != MediaSourceMode::Moonlight) {
             throw std::invalid_argument("--service requires --source=moonlight");
         }
-        if (!options.dataDirectory || !std::filesystem::is_directory(*options.dataDirectory)) {
-            throw std::invalid_argument(
-                "--service requires an existing --data-dir containing the Moonlight identity");
-        }
+        options.dataDirectory = gateway::moonlight::MoonlightIdentity::resolveStorageDirectory(
+            options.dataDirectory, gateway::moonlight::MoonlightDataDirectoryMode::Service);
     }
     return options;
 }
@@ -251,8 +265,11 @@ public:
         , moonlightOptions_{options.host, options.application}
         , identity_(sourceMode_ == MediaSourceMode::Moonlight
                         ? std::make_unique<gateway::moonlight::MoonlightIdentity>(
-                            options.dataDirectory.value_or(
-                                gateway::moonlight::MoonlightIdentity::defaultStorageDirectory()))
+                            gateway::moonlight::MoonlightIdentity::resolveStorageDirectory(
+                                options.dataDirectory,
+                                options.hostMode == ProgramHostMode::Service
+                                    ? gateway::moonlight::MoonlightDataDirectoryMode::Service
+                                    : gateway::moonlight::MoonlightDataDirectoryMode::Console))
                         : nullptr)
         , logger_(std::move(logger))
         , server_(makeServerConfiguration())
@@ -1642,7 +1659,11 @@ private:
 int runMoonlightPairing(const ProgramOptions& options)
 {
     gateway::moonlight::MoonlightIdentity identity(
-        options.dataDirectory.value_or(gateway::moonlight::MoonlightIdentity::defaultStorageDirectory()));
+        gateway::moonlight::MoonlightIdentity::resolveStorageDirectory(
+            options.dataDirectory,
+            options.hostMode == ProgramHostMode::Service
+                ? gateway::moonlight::MoonlightDataDirectoryMode::Service
+                : gateway::moonlight::MoonlightDataDirectoryMode::Console));
     const auto logger = [](const std::string& message) {
         std::cout << message << std::endl;
     };
@@ -1769,11 +1790,26 @@ int main(int argc, char** argv)
 {
     try {
         const auto options = parseProgramOptions(argc, argv);
+        if (options.migrationSourceDirectory) {
+            const auto result = gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                *options.migrationSourceDirectory, *options.dataDirectory);
+            std::cout << (result == gateway::moonlight::MoonlightIdentityMigrationResult::Migrated
+                              ? "Gateway data migration completed"
+                              : "Gateway data destination is already authoritative")
+                      << std::endl;
+            return 0;
+        }
         if (options.pair) {
             return runMoonlightPairing(options);
         }
 
         RuntimeLogger logger(options);
+        if (options.hostMode == ProgramHostMode::Service) {
+            logger((options.dataDirectoryExplicit
+                        ? "Service data root selected from explicit --data-dir: "
+                        : "Service data root selected from ProgramData default: ")
+                   + options.dataDirectory->string());
+        }
         gateway::GatewayShutdownSignal shutdown;
         const auto runtime = [&options, &shutdown, &logger](
                                  const gateway::WindowsServiceHost::ReadyCallback& ready) {

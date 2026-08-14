@@ -113,6 +113,9 @@ target_link_libraries(moonlight_control PUBLIC
     OpenSSL::Crypto
     OpenSSL::SSL
     pugixml::pugixml
+    advapi32
+    shell32
+    ole32
     user32
     ws2_32
 )

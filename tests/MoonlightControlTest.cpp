@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <ranges>
@@ -364,6 +365,83 @@ int main()
         require(gateway::moonlight::SunshineHttpClient::certificatesMatch(
                     firstCertificate, reloadedIdentity.certificatePem()),
                 "Matching pinned certificate was rejected");
+
+        const auto explicitDataDirectory = firstDirectory.path() / "explicit-data";
+        require(gateway::moonlight::MoonlightIdentity::resolveStorageDirectory(
+                    explicitDataDirectory,
+                    gateway::moonlight::MoonlightDataDirectoryMode::Service)
+                    == explicitDataDirectory,
+                "Explicit --data-dir did not take precedence for service mode");
+        const auto serviceDataDirectory = gateway::moonlight::MoonlightIdentity::resolveStorageDirectory(
+            std::nullopt, gateway::moonlight::MoonlightDataDirectoryMode::Service);
+        require(serviceDataDirectory.filename() == "MoonlightWebRTC"
+                    && serviceDataDirectory.parent_path()
+                        == gateway::moonlight::MoonlightIdentity::serviceStorageDirectory().parent_path(),
+                "Service data directory did not resolve under ProgramData");
+
+        TemporaryDirectory migrationRoot;
+        const auto legacyDirectory = migrationRoot.path() / "legacy";
+        const auto migratedDirectory = migrationRoot.path() / "program-data";
+        gateway::moonlight::MoonlightIdentity legacyIdentity(legacyDirectory);
+        legacyIdentity.savePairedHost(savedHost);
+        {
+            std::ofstream extraConfiguration(legacyDirectory / "gateway-settings.json");
+            extraConfiguration << "{\"preserved\":true}\n";
+        }
+        std::filesystem::create_directories(migratedDirectory);
+        require(gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                    legacyDirectory, migratedDirectory)
+                    == gateway::moonlight::MoonlightIdentityMigrationResult::Migrated,
+                "Legacy identity was not migrated into empty ProgramData");
+        gateway::moonlight::MoonlightIdentity migratedIdentity(migratedDirectory);
+        require(migratedIdentity.certificatePem() == legacyIdentity.certificatePem()
+                    && migratedIdentity.privateKeyPem() == legacyIdentity.privateKeyPem()
+                    && migratedIdentity.uniqueId() == legacyIdentity.uniqueId()
+                    && migratedIdentity.pairedHost("host-id")
+                    && std::filesystem::exists(migratedDirectory / "gateway-settings.json")
+                    && std::filesystem::exists(migratedDirectory / "gateway-service.log")
+                    && std::filesystem::exists(legacyDirectory / "client-private-key.pem"),
+                "Migration did not preserve identity, pairing, configuration, and source data");
+        require(gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                    legacyDirectory, migratedDirectory)
+                    == gateway::moonlight::MoonlightIdentityMigrationResult::DestinationAuthoritative,
+                "Repeated migration was not idempotent");
+
+        TemporaryDirectory authoritativeRoot;
+        const auto authoritativeDirectory = authoritativeRoot.path() / "program-data";
+        gateway::moonlight::MoonlightIdentity authoritativeIdentity(authoritativeDirectory);
+        const std::string authoritativeId = authoritativeIdentity.uniqueId();
+        require(gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                    legacyDirectory, authoritativeDirectory)
+                    == gateway::moonlight::MoonlightIdentityMigrationResult::DestinationAuthoritative,
+                "Existing ProgramData identity was not kept authoritative");
+        require(gateway::moonlight::MoonlightIdentity(authoritativeDirectory).uniqueId()
+                    == authoritativeId,
+                "Existing ProgramData identity was overwritten by legacy data");
+
+        TemporaryDirectory invalidMigrationRoot;
+        const auto invalidLegacy = invalidMigrationRoot.path() / "legacy";
+        const auto invalidDestination = invalidMigrationRoot.path() / "program-data";
+        std::filesystem::create_directories(invalidLegacy);
+        {
+            std::ofstream incompleteIdentity(invalidLegacy / "client-unique-id.txt");
+            incompleteIdentity << "incomplete\n";
+        }
+        bool invalidMigrationRejected = false;
+        try {
+            gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                invalidLegacy, invalidDestination);
+        } catch (const std::exception&) {
+            invalidMigrationRejected = true;
+        }
+        require(invalidMigrationRejected && !std::filesystem::exists(invalidDestination),
+                "Failed migration created an unexpected conflicting identity");
+
+        TemporaryDirectory freshRoot;
+        const auto freshProgramDataDirectory = freshRoot.path() / "program-data";
+        gateway::moonlight::MoonlightIdentity freshIdentity(freshProgramDataDirectory);
+        require(!freshIdentity.uniqueId().empty(),
+                "Fresh ProgramData installation did not create a valid identity");
 
         const std::vector<std::uint8_t> salt(16, 0x42);
         const auto aesKey = gateway::moonlight::MoonlightPairing::deriveAesKey(

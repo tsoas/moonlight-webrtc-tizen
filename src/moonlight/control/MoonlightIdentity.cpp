@@ -7,6 +7,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#include <ShlObj.h>
+#include <sddl.h>
+#include <windows.h>
+
 #include <nlohmann/json.hpp>
 #include <openssl/bio.h>
 #include <openssl/pem.h>
@@ -76,6 +80,100 @@ std::string randomUniqueId()
     return result.str();
 }
 
+std::filesystem::path identityPath(const std::filesystem::path& directory,
+                                   const char* filename)
+{
+    return directory / filename;
+}
+
+int identityFileCount(const std::filesystem::path& directory)
+{
+    return static_cast<int>(std::filesystem::exists(identityPath(directory, "client-certificate.pem")))
+        + static_cast<int>(std::filesystem::exists(identityPath(directory, "client-private-key.pem")))
+        + static_cast<int>(std::filesystem::exists(identityPath(directory, "client-unique-id.txt")));
+}
+
+bool isEmptyDirectory(const std::filesystem::path& directory)
+{
+    std::error_code error;
+    const bool empty = std::filesystem::is_empty(directory, error);
+    if (error) {
+        throw std::runtime_error("Unable to inspect data directory: " + directory.string());
+    }
+    return empty;
+}
+
+std::filesystem::path migrationStagingDirectory(const std::filesystem::path& destination)
+{
+    return destination.parent_path()
+        / ("." + destination.filename().string() + ".migration-staging");
+}
+
+void restrictMigrationStagingDirectory(const std::filesystem::path& directory)
+{
+    // Keep private identity material out of the inherited ProgramData ACL while
+    // the migration copy is being assembled. The installer adds the service SID
+    // after publishing the directory and before the service can start.
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    constexpr auto Descriptor = L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            Descriptor, SDDL_REVISION_1, &descriptor, nullptr)) {
+        throw std::runtime_error("Unable to prepare secure Gateway migration ACL: "
+                                 + std::to_string(GetLastError()));
+    }
+
+    const BOOL applied = SetFileSecurityW(
+        directory.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor);
+    const DWORD error = applied ? ERROR_SUCCESS : GetLastError();
+    LocalFree(descriptor);
+    if (!applied) {
+        throw std::runtime_error("Unable to secure Gateway migration staging directory: "
+                                 + std::to_string(error));
+    }
+}
+
+bool isProgramDataParent(const std::filesystem::path& directory)
+{
+    std::error_code error;
+    const auto programDataParent = MoonlightIdentity::serviceStorageDirectory().parent_path();
+    return std::filesystem::equivalent(directory.parent_path(), programDataParent, error)
+        && !error;
+}
+
+void copyMigrationSource(const std::filesystem::path& source,
+                         const std::filesystem::path& staging)
+{
+    std::error_code error;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(source)) {
+        if (entry.is_symlink()) {
+            throw std::runtime_error(
+                "Refusing to migrate a data directory containing symbolic links");
+        }
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(source)) {
+        std::filesystem::copy(entry.path(),
+                              staging / entry.path().filename(),
+                              std::filesystem::copy_options::recursive,
+                              error);
+        if (error) {
+            throw std::runtime_error(
+                "Unable to copy legacy Gateway data: " + error.message());
+        }
+    }
+}
+
+void appendMigrationLog(const std::filesystem::path& directory)
+{
+    std::ofstream log(directory / "gateway-service.log", std::ios::out | std::ios::app);
+    if (!log) {
+        throw std::runtime_error("Unable to write the Gateway migration log");
+    }
+    log << "Gateway data migration completed; legacy source was left untouched.\n";
+    if (!log) {
+        throw std::runtime_error("Unable to finish the Gateway migration log");
+    }
+}
+
 } // namespace
 
 MoonlightIdentity::MoonlightIdentity(std::filesystem::path storageDirectory)
@@ -95,6 +193,116 @@ std::filesystem::path MoonlightIdentity::defaultStorageDirectory()
         throw std::runtime_error("LOCALAPPDATA is not available");
     }
     return std::filesystem::path(localAppData) / "MoonlightWebRTC";
+}
+
+std::filesystem::path MoonlightIdentity::serviceStorageDirectory()
+{
+    PWSTR programData = nullptr;
+    const HRESULT result = SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &programData);
+    if (FAILED(result) || !programData) {
+        throw std::runtime_error("Unable to resolve the Windows ProgramData known folder");
+    }
+
+    const std::filesystem::path directory = std::filesystem::path(programData) / "MoonlightWebRTC";
+    CoTaskMemFree(programData);
+    return directory;
+}
+
+std::filesystem::path MoonlightIdentity::resolveStorageDirectory(
+    const std::optional<std::filesystem::path>& explicitDirectory,
+    MoonlightDataDirectoryMode mode)
+{
+    if (explicitDirectory) {
+        return *explicitDirectory;
+    }
+    return mode == MoonlightDataDirectoryMode::Service
+        ? serviceStorageDirectory()
+        : defaultStorageDirectory();
+}
+
+MoonlightIdentityMigrationResult MoonlightIdentity::migrateStorageDirectory(
+    const std::filesystem::path& sourceDirectory,
+    const std::filesystem::path& destinationDirectory)
+{
+    if (!std::filesystem::is_directory(sourceDirectory)) {
+        throw std::runtime_error("Legacy Gateway data directory does not exist: "
+                                 + sourceDirectory.string());
+    }
+
+    const bool destinationExists = std::filesystem::exists(destinationDirectory);
+    if (destinationExists && !std::filesystem::is_directory(destinationDirectory)) {
+        throw std::runtime_error("Gateway data destination is not a directory: "
+                                 + destinationDirectory.string());
+    }
+
+    if (destinationExists && identityFileCount(destinationDirectory) == 3) {
+        validateExistingStorageDirectory(destinationDirectory);
+        return MoonlightIdentityMigrationResult::DestinationAuthoritative;
+    }
+    if (destinationExists && !isEmptyDirectory(destinationDirectory)) {
+        throw std::runtime_error(
+            "Gateway data destination is populated but has no valid complete identity; refusing to merge");
+    }
+
+    validateExistingStorageDirectory(sourceDirectory);
+
+    const std::filesystem::path stagingDirectory = migrationStagingDirectory(destinationDirectory);
+    if (std::filesystem::exists(stagingDirectory)) {
+        if (!std::filesystem::is_directory(stagingDirectory)) {
+            throw std::runtime_error("Gateway migration staging path is not a directory: "
+                                     + stagingDirectory.string());
+        }
+        try {
+            validateExistingStorageDirectory(stagingDirectory);
+        } catch (...) {
+            std::error_code removeError;
+            std::filesystem::remove_all(stagingDirectory, removeError);
+            if (removeError) {
+                throw std::runtime_error(
+                    "Gateway migration staging data is invalid and cannot be removed safely: "
+                    + removeError.message());
+            }
+        }
+    }
+
+    if (!std::filesystem::exists(stagingDirectory)) {
+        std::error_code error;
+        std::filesystem::create_directories(stagingDirectory, error);
+        if (error) {
+            throw std::runtime_error("Unable to create Gateway migration staging directory: "
+                                     + error.message());
+        }
+        try {
+            if (isProgramDataParent(stagingDirectory)) {
+                restrictMigrationStagingDirectory(stagingDirectory);
+            }
+            copyMigrationSource(sourceDirectory, stagingDirectory);
+            validateExistingStorageDirectory(stagingDirectory);
+            appendMigrationLog(stagingDirectory);
+        } catch (...) {
+            std::error_code removeError;
+            std::filesystem::remove_all(stagingDirectory, removeError);
+            throw;
+        }
+    }
+
+    // The staging directory is complete and valid. If a prior attempt stopped after
+    // staging, this publishes that same validated copy instead of creating a new identity.
+    if (std::filesystem::exists(destinationDirectory)) {
+        std::error_code error;
+        std::filesystem::remove(destinationDirectory, error);
+        if (error) {
+            throw std::runtime_error("Unable to replace empty Gateway data destination: "
+                                     + error.message());
+        }
+    }
+
+    std::error_code error;
+    std::filesystem::rename(stagingDirectory, destinationDirectory, error);
+    if (error) {
+        throw std::runtime_error("Unable to publish migrated Gateway data: " + error.message());
+    }
+    return MoonlightIdentityMigrationResult::Migrated;
 }
 
 const std::filesystem::path& MoonlightIdentity::storageDirectory() const
@@ -131,11 +339,7 @@ void MoonlightIdentity::loadOrCreate()
 {
     std::filesystem::create_directories(storageDirectory_);
 
-    const bool certificateExists = std::filesystem::exists(certificatePath_);
-    const bool privateKeyExists = std::filesystem::exists(privateKeyPath_);
-    const bool uniqueIdExists = std::filesystem::exists(uniqueIdPath_);
-    const int existingFiles = static_cast<int>(certificateExists)
-        + static_cast<int>(privateKeyExists) + static_cast<int>(uniqueIdExists);
+    const int existingFiles = identityFileCount(storageDirectory_);
 
     if (existingFiles == 0) {
         createCredentials();
@@ -155,6 +359,23 @@ void MoonlightIdentity::loadOrCreate()
     validateCredentials();
     if (uniqueId_.empty()) {
         throw std::runtime_error("Moonlight unique client ID is empty");
+    }
+}
+
+void MoonlightIdentity::validateExistingStorageDirectory(const std::filesystem::path& directory)
+{
+    if (!std::filesystem::is_directory(directory) || identityFileCount(directory) != 3) {
+        throw std::runtime_error("Gateway data directory does not contain a complete identity: "
+                                 + directory.string());
+    }
+
+    MoonlightIdentity identity(directory);
+    const auto hostsPath = directory / "paired-hosts.json";
+    if (std::filesystem::exists(hostsPath)) {
+        const Json hosts = Json::parse(readTextFile(hostsPath));
+        if (!hosts.is_object()) {
+            throw std::runtime_error("Paired Sunshine host data is not a JSON object");
+        }
     }
 }
 

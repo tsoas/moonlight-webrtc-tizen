@@ -8,11 +8,28 @@
 
 namespace gateway::moonlight {
 
+enum class MoonlightDataDirectoryMode {
+    Console,
+    Service,
+};
+
+enum class MoonlightIdentityMigrationResult {
+    Migrated,
+    DestinationAuthoritative,
+};
+
 class MoonlightIdentity {
 public:
     explicit MoonlightIdentity(std::filesystem::path storageDirectory = defaultStorageDirectory());
 
     static std::filesystem::path defaultStorageDirectory();
+    static std::filesystem::path serviceStorageDirectory();
+    static std::filesystem::path resolveStorageDirectory(
+        const std::optional<std::filesystem::path>& explicitDirectory,
+        MoonlightDataDirectoryMode mode);
+    static MoonlightIdentityMigrationResult migrateStorageDirectory(
+        const std::filesystem::path& sourceDirectory,
+        const std::filesystem::path& destinationDirectory);
 
     const std::filesystem::path& storageDirectory() const;
     const std::filesystem::path& certificatePath() const;
@@ -25,6 +42,7 @@ public:
     void savePairedHost(const PairedSunshineHost& host);
 
 private:
+    static void validateExistingStorageDirectory(const std::filesystem::path& directory);
     void loadOrCreate();
     void createCredentials();
     void validateCredentials() const;
