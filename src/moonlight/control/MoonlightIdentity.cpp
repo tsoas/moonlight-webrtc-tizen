@@ -495,6 +495,15 @@ void MoonlightIdentity::savePairedHost(const PairedSunshineHost& host)
     writeTextFile(hostsPath_, hosts.dump(2) + "\n");
 }
 
+bool MoonlightIdentity::removePairedHost(const std::string& serverUniqueId)
+{
+    if (!std::filesystem::exists(hostsPath_)) return false;
+    Json hosts = Json::parse(readTextFile(hostsPath_));
+    if (!hosts.is_object() || !hosts.erase(serverUniqueId)) return false;
+    writeTextFile(hostsPath_, hosts.dump(2) + "\n");
+    return true;
+}
+
 std::optional<std::string> MoonlightIdentity::configuredSunshineHost() const
 {
     if (!std::filesystem::exists(sunshineHostPath_)) return std::nullopt;

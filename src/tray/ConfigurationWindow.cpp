@@ -28,6 +28,8 @@ constexpr int ContentTop = 82;
 constexpr int ContentBottom = 22;
 constexpr UINT SaveHostCommandId = 301;
 constexpr UINT TestHostCommandId = 302;
+constexpr UINT PairCommandId = 303;
+constexpr UINT UnpairCommandId = 304;
 constexpr UINT ManagementResultMessage = WM_APP + 31;
 
 struct PageDefinition {
@@ -160,7 +162,10 @@ void ConfigurationWindow::close()
 
 void ConfigurationWindow::statusChanged()
 {
-    if (window_) InvalidateRect(window_, nullptr, FALSE);
+    if (window_) {
+        updatePairingControls();
+        InvalidateRect(window_, nullptr, FALSE);
+    }
 }
 
 LRESULT CALLBACK ConfigurationWindow::windowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -193,6 +198,17 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
                                      narrow(host)});
             return 0;
         }
+        if (LOWORD(wParam) == PairCommandId) {
+            startManagementOperation({managementipc::CommandType::Pair, {}});
+            return 0;
+        }
+        if (LOWORD(wParam) == UnpairCommandId) {
+            if (MessageBoxW(window, L"Remove this Gateway's local Sunshine trust? Sunshine does not provide remote revocation. This keeps the Gateway identity and other hosts.",
+                            L"Unpair Sunshine", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDYES) {
+                startManagementOperation({managementipc::CommandType::Unpair, {}});
+            }
+            return 0;
+        }
         break;
     case WM_CTLCOLOREDIT: {
         SetTextColor(reinterpret_cast<HDC>(wParam), theme::TextPrimary);
@@ -213,7 +229,7 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
         return 0;
     case WM_DESTROY:
         window_ = nullptr;
-        hostEdit_ = saveButton_ = testButton_ = nullptr;
+        hostEdit_ = saveButton_ = testButton_ = pairButton_ = unpairButton_ = nullptr;
         return 0;
     default:
         return DefWindowProcW(window, message, wParam, lParam);
@@ -245,6 +261,12 @@ void ConfigurationWindow::updateSunshineControls(HWND window)
         testButton_ = CreateWindowExW(0, L"BUTTON", L"Test Connection", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
                                       ContentLeft + 422, ContentTop + 122, 176, 30, window,
                                       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(TestHostCommandId)), nullptr, nullptr);
+        pairButton_ = CreateWindowExW(0, L"BUTTON", L"Pair", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                      ContentLeft + 320, ContentTop + 162, 92, 30, window,
+                                      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(PairCommandId)), nullptr, nullptr);
+        unpairButton_ = CreateWindowExW(0, L"BUTTON", L"Unpair", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                        ContentLeft + 422, ContentTop + 162, 176, 30, window,
+                                        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(UnpairCommandId)), nullptr, nullptr);
         const StatusState state = statusProvider_ ? statusProvider_() : StatusState{};
         if (state.status && state.status->sunshineHost) SetWindowTextW(hostEdit_, widen(*state.status->sunshineHost).c_str());
     }
@@ -252,7 +274,18 @@ void ConfigurationWindow::updateSunshineControls(HWND window)
         ShowWindow(hostEdit_, sunshine ? SW_SHOW : SW_HIDE);
         ShowWindow(saveButton_, sunshine ? SW_SHOW : SW_HIDE);
         ShowWindow(testButton_, sunshine ? SW_SHOW : SW_HIDE);
+        updatePairingControls();
     }
+}
+
+void ConfigurationWindow::updatePairingControls()
+{
+    if (!pairButton_) return;
+    const StatusState state = statusProvider_ ? statusProvider_() : StatusState{};
+    const bool paired = state.status && state.status->sunshinePaired && *state.status->sunshinePaired;
+    const bool visible = page_ == Page::Sunshine && state.gatewayAvailable;
+    ShowWindow(pairButton_, visible && !paired ? SW_SHOW : SW_HIDE);
+    ShowWindow(unpairButton_, visible && paired ? SW_SHOW : SW_HIDE);
 }
 
 void ConfigurationWindow::startManagementOperation(managementipc::Command command)
@@ -266,6 +299,20 @@ void ConfigurationWindow::startManagementOperation(managementipc::Command comman
     operationThread_ = std::thread([this, command = std::move(command), notificationWindow] {
         managementipc::Result result{false, "unavailable", "Management IPC is unavailable"};
         try { result = managementProvider_(command); } catch (...) {}
+        if (command.type == managementipc::CommandType::Pair && result.ok
+            && result.code == "pairing-started" && result.pin) {
+            {
+                std::lock_guard resultLock(operationMutex_);
+                operationStatus_ = L"PIN " + widen(*result.pin)
+                    + L": enter it in Sunshine. Pairing in progress…";
+            }
+            if (notificationWindow) PostMessageW(notificationWindow, ManagementResultMessage, 0, 0);
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                try { result = managementProvider_({managementipc::CommandType::PairStatus, {}}); } catch (...) { result = {false, "unavailable", "Management IPC is unavailable"}; }
+                if (result.code != "pairing-in-progress") break;
+            }
+        }
         {
             std::lock_guard resultLock(operationMutex_);
             operationActive_ = false;
@@ -351,14 +398,14 @@ void ConfigurationWindow::paint(HWND window)
             {L"Pairing", state.status ? boolValue(state.status->sunshinePaired, L"Paired", L"Not paired") : L"Unavailable"},
             {L"Running application", applicationValue(state)},
             {L"Session", state.status && state.status->sessionActive && *state.status->sessionActive ? L"Active" : L"Inactive"},
-        }, panel.top + 178);
+        }, panel.top + 218);
         std::wstring operation;
         {
             std::lock_guard lock(operationMutex_);
             operation = operationStatus_;
         }
         if (!operation.empty()) {
-            drawText(dc, operation, RECT{panel.left + 28, panel.bottom - 52, panel.right - 28, panel.bottom - 20},
+            drawText(dc, operation, RECT{panel.left + 28, panel.bottom - 28, panel.right - 28, panel.bottom - 6},
                      labelFont, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
     } else if (page_ == Page::Network) {

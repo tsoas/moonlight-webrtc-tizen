@@ -18,7 +18,14 @@ void requireVersion(const Json& value)
 
 const char* commandName(CommandType command)
 {
-    return command == CommandType::SetHost ? "set-host" : "test";
+    switch (command) {
+    case CommandType::SetHost: return "set-host";
+    case CommandType::Test: return "test";
+    case CommandType::Pair: return "pair";
+    case CommandType::PairStatus: return "pair-status";
+    case CommandType::Unpair: return "unpair";
+    }
+    throw std::invalid_argument("Unsupported management IPC command");
 }
 
 Command parseCommand(std::string_view payload)
@@ -34,6 +41,9 @@ Command parseCommand(std::string_view payload)
         return {CommandType::SetHost, value.at("host").get<std::string>()};
     }
     if (type == "test" && value.size() == 2) return {CommandType::Test, {}};
+    if (type == "pair" && value.size() == 2) return {CommandType::Pair, {}};
+    if (type == "pair-status" && value.size() == 2) return {CommandType::PairStatus, {}};
+    if (type == "unpair" && value.size() == 2) return {CommandType::Unpair, {}};
     throw std::invalid_argument("Unsupported management IPC command");
 }
 
@@ -53,16 +63,21 @@ Result parseResult(std::string_view payload, CommandType expected)
         || !value.contains("ok") || !value.at("ok").is_boolean()
         || !value.contains("code") || !value.at("code").is_string()
         || !value.contains("message") || !value.at("message").is_string()
-        || value.size() != 6) {
+        || (value.size() != 6 && value.size() != 7)
+        || (value.contains("pin") && (!value.at("pin").is_string() || value.at("pin").get<std::string>().size() != 4))) {
         throw std::invalid_argument("Invalid management IPC response");
     }
-    return {value.at("ok").get<bool>(), value.at("code").get<std::string>(), value.at("message").get<std::string>()};
+    Result result{value.at("ok").get<bool>(), value.at("code").get<std::string>(), value.at("message").get<std::string>()};
+    if (value.contains("pin")) result.pin = value.at("pin").get<std::string>();
+    return result;
 }
 
 std::string makeResult(CommandType command, const Result& result)
 {
-    return Json{{"version", ProtocolVersion}, {"type", "result"},
+    Json response{{"version", ProtocolVersion}, {"type", "result"},
                 {"command", commandName(command)}, {"ok", result.ok},
-                {"code", result.code}, {"message", result.message}}.dump();
+                {"code", result.code}, {"message", result.message}};
+    if (result.pin) response["pin"] = *result.pin;
+    return response.dump();
 }
 } // namespace gateway::managementipc

@@ -40,6 +40,7 @@ public:
 
     std::optional<PairedSunshineHost> pairedHost(const std::string& serverUniqueId) const;
     void savePairedHost(const PairedSunshineHost& host);
+    bool removePairedHost(const std::string& serverUniqueId);
     std::optional<std::string> configuredSunshineHost() const;
     void saveConfiguredSunshineHost(const std::string& host);
     static bool isValidSunshineHost(std::string_view host);

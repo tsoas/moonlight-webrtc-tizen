@@ -30,11 +30,14 @@ private:
     void selectPageFromPoint(HWND window, POINT point);
     void updateSunshineControls(HWND window);
     void startManagementOperation(managementipc::Command command);
+    void updatePairingControls();
 
     HWND window_ = nullptr;
     HWND hostEdit_ = nullptr;
     HWND saveButton_ = nullptr;
     HWND testButton_ = nullptr;
+    HWND pairButton_ = nullptr;
+    HWND unpairButton_ = nullptr;
     StatusProvider statusProvider_;
     ManagementProvider managementProvider_;
     Page page_ = Page::Status;

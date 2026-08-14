@@ -365,6 +365,14 @@ int main()
         bool invalidConfiguredHostRejected = false;
         try { firstIdentity.saveConfiguredSunshineHost("sunshine:47990"); } catch (const std::exception&) { invalidConfiguredHostRejected = true; }
         require(invalidConfiguredHostRejected, "Configured Sunshine host accepted a URL port");
+        const std::string preservedIdentity = firstIdentity.uniqueId();
+        require(firstIdentity.removePairedHost("host-id")
+                    && !gateway::moonlight::MoonlightIdentity(firstDirectory.path()).pairedHost("host-id")
+                    && gateway::moonlight::MoonlightIdentity(firstDirectory.path()).uniqueId() == preservedIdentity
+                    && std::filesystem::exists(firstDirectory.path() / "client-private-key.pem"),
+                "Removing one paired host changed the Gateway identity");
+        require(!firstIdentity.removePairedHost("host-id"),
+                "Removing a missing paired host unexpectedly succeeded");
 
         TemporaryDirectory secondDirectory;
         gateway::moonlight::MoonlightIdentity secondIdentity(secondDirectory.path());

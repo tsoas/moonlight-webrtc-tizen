@@ -37,12 +37,17 @@ the active interactive session and is neither Session 0 nor a service identity b
 accepts any command.
 
 Messages are a bounded (16 KiB) little-endian 32-bit length followed by JSON. Version 1
-accepts only `set-host` and `test` commands; every response is a structured `result` with
+accepts only `set-host`, `test`, `pair`, `pair-status`, and `unpair` commands; every response is a structured `result` with
 the requested command, `ok`, a stable code, and a user-safe message. The service remains
 the sole writer of ProgramData and pairing material. `set-host` writes only
 `sunshine-host.txt`; `test` first validates Sunshine's protocol response and, when paired,
-performs an authenticated request using the existing pinned certificate. It does not pair,
-unpair, or mutate Sunshine state.
+performs an authenticated request using the existing pinned certificate. `pair` returns a
+new four-digit PIN only over this authenticated local pipe, starts the existing Moonlight
+pairing flow asynchronously, and is followed with `pair-status`; the PIN is never logged
+or persisted. Sunshine's `unpair` request is only available for cancelling an in-progress
+pairing (a completed pairing returns HTTP 404), so `unpair` accurately performs local trust
+removal only: it removes the matching host entry from `paired-hosts.json`. It never deletes
+the Gateway identity or ProgramData directory, and does not claim Sunshine-side revocation.
 
 ## Gateway startup
 

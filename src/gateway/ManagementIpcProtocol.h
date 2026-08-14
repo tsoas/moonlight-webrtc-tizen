@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -9,7 +10,7 @@ namespace gateway::managementipc {
 inline constexpr std::uint32_t ProtocolVersion = 1;
 inline constexpr std::size_t MaximumMessageBytes = 16 * 1024;
 
-enum class CommandType { SetHost, Test };
+enum class CommandType { SetHost, Test, Pair, PairStatus, Unpair };
 
 struct Command {
     CommandType type;
@@ -20,6 +21,9 @@ struct Result {
     bool ok = false;
     std::string code;
     std::string message;
+    // The PIN is carried only on the already mutually-authenticated local pipe
+    // and is never written to logs or persistent storage.
+    std::optional<std::string> pin;
 };
 
 Command parseCommand(std::string_view payload);

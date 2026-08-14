@@ -309,6 +309,9 @@ public:
 
     ~SignalingServer()
     {
+        if (pairingThread_.joinable()) {
+            pairingThread_.join();
+        }
         std::shared_ptr<Session> session;
         {
             const std::lock_guard lock(sessionMutex_);
@@ -1125,6 +1128,23 @@ public:
                 return {false, "persistence-failed", "Unable to save the Sunshine host"};
             }
         }
+
+        if (command.type == gateway::managementipc::CommandType::PairStatus) {
+            std::lock_guard lock(pairingMutex_);
+            return pairingResult_;
+        }
+
+        if (command.type == gateway::managementipc::CommandType::Pair) {
+            return startPairing();
+        }
+
+        if (command.type == gateway::managementipc::CommandType::Unpair) {
+            return unpairConfiguredHost();
+        }
+
+        if (command.type != gateway::managementipc::CommandType::Test) {
+            return {false, "unsupported-command", "Unsupported Sunshine management command"};
+        }
         try {
             const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
                 *identity_, configuredMoonlightOptions().host, [](const std::string&) {});
@@ -1195,6 +1215,103 @@ public:
     }
 
 private:
+    gateway::managementipc::Result startPairing()
+    {
+        bool joinFinishedPairing = false;
+        {
+            std::lock_guard lock(pairingMutex_);
+            if (pairingInProgress_) {
+                return {false, "pairing-in-progress", "Pairing is already in progress"};
+            }
+            joinFinishedPairing = pairingThread_.joinable();
+        }
+        if (joinFinishedPairing) pairingThread_.join();
+
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, configuredMoonlightOptions().host, [](const std::string&) {});
+            if (detected.pairedHost && detected.serverInfo.pairStatus == 1) {
+                return {false, "already-paired", "This Gateway is already paired with Sunshine"};
+            }
+            if (detected.serverInfo.pairStatus == 1) {
+                return {false, "pairing-state-unknown", "Sunshine reports pairing but local trust is unavailable; pairing was not replaced"};
+            }
+
+            const std::string pin = gateway::moonlight::MoonlightPairing::generatePin();
+            {
+                std::lock_guard lock(pairingMutex_);
+                pairingInProgress_ = true;
+                pairingResult_ = {false, "pairing-in-progress", "Pairing is in progress"};
+            }
+            pairingThread_ = std::thread([this, detected, pin] {
+                gateway::managementipc::Result result;
+                try {
+                    gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+                    client.setHttpsPort(detected.serverInfo.httpsPort);
+                    gateway::moonlight::MoonlightPairing pairing(*identity_, client);
+                    const auto outcome = pairing.pair(detected.serverInfo.appVersion, pin);
+                    if (outcome.result == gateway::moonlight::MoonlightPairing::Result::IncorrectPin) {
+                        result = {false, "incorrect-pin", "Sunshine rejected the pairing PIN"};
+                    } else if (outcome.result == gateway::moonlight::MoonlightPairing::Result::AlreadyInProgress) {
+                        result = {false, "pairing-busy", "Sunshine is already handling another pairing request"};
+                    } else if (outcome.result != gateway::moonlight::MoonlightPairing::Result::Paired) {
+                        result = {false, "pairing-failed", "Sunshine pairing did not complete"};
+                    } else {
+                        gateway::moonlight::PairedSunshineHost host{
+                            detected.serverInfo.uniqueId, detected.serverInfo.hostname, detected.address,
+                            detected.serverInfo.httpsPort, outcome.serverCertificatePem};
+                        identity_->savePairedHost(host);
+                        client.setPinnedServerCertificate(outcome.serverCertificatePem);
+                        const auto verified = client.getServerInfo(true, std::chrono::seconds(5));
+                        result = verified.pairStatus == 1
+                            ? gateway::managementipc::Result{true, "paired", "Sunshine pairing completed"}
+                            : gateway::managementipc::Result{false, "pairing-unverified", "Sunshine did not confirm the new pairing"};
+                    }
+                } catch (const std::exception&) {
+                    result = {false, "pairing-failed", "Sunshine pairing failed"};
+                }
+                {
+                    std::lock_guard lock(pairingMutex_);
+                    pairingResult_ = std::move(result);
+                    pairingInProgress_ = false;
+                }
+            });
+            return {true, "pairing-started", "Enter this PIN in Sunshine to continue pairing", pin};
+        } catch (const std::exception&) {
+            return {false, "unreachable", "Sunshine is unreachable"};
+        }
+    }
+
+    gateway::managementipc::Result unpairConfiguredHost()
+    {
+        {
+            const std::lock_guard lock(sessionMutex_);
+            if (activeSession_) {
+                const std::lock_guard streamLock(activeSession_->streamMutex);
+                if (activeSession_->sessionId != 0) {
+                    return {false, "active-session", "Disconnect or stop the active stream before unpairing"};
+                }
+            }
+        }
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, configuredMoonlightOptions().host, [](const std::string&) {});
+            if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
+                return {false, "not-paired", "This Gateway is not paired with Sunshine"};
+            }
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            client.setHttpsPort(detected.serverInfo.httpsPort);
+            client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
+            if (!identity_->removePairedHost(detected.serverInfo.uniqueId)) {
+                return {false, "local-trust-missing", "Local Sunshine trust was already unavailable"};
+            }
+            return {true, "local-unpaired", "Local Sunshine trust was removed; Sunshine has no remote unpair endpoint"};
+        } catch (const std::exception& error) {
+            log("Local Sunshine trust removal failed: " + std::string(error.what()));
+            return {false, "unpair-failed", "Local Sunshine trust was preserved"};
+        }
+    }
+
     gateway::moonlight::MoonlightSessionOptions configuredMoonlightOptions() const
     {
         const std::lock_guard lock(moonlightOptionsMutex_);
@@ -1759,6 +1876,10 @@ private:
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;
+    std::mutex pairingMutex_;
+    std::thread pairingThread_;
+    bool pairingInProgress_ = false;
+    gateway::managementipc::Result pairingResult_{false, "not-started", "No pairing operation is active"};
     std::atomic<std::uint64_t> nextSessionId_ = 1;
     rtc::WebSocketServer server_;
 
