@@ -1,5 +1,6 @@
 #include "tray/ServiceIpcClient.h"
 #include "tray/ConfigurationWindow.h"
+#include "tray/ManagementIpcServer.h"
 #include "tray/StatusMonitor.h"
 
 #include <windows.h>
@@ -18,6 +19,7 @@ constexpr UINT TrayCallbackMessage = WM_APP + 1;
 
 struct TrayState {
     std::unique_ptr<gateway::tray::StatusMonitor> monitor;
+    std::unique_ptr<gateway::tray::ManagementIpcServer> management;
     gateway::tray::ConfigurationWindow configurationWindow;
 };
 
@@ -110,6 +112,8 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         state->monitor = std::make_unique<gateway::tray::StatusMonitor>(window);
         state->monitor->start();
+        state->management = std::make_unique<gateway::tray::ManagementIpcServer>();
+        state->management->start();
         refreshStatus(window, *state);
         return 0;
     case gateway::tray::StatusChangedMessage:
@@ -125,6 +129,9 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             state->configurationWindow.show(
                 GetModuleHandleW(nullptr), [monitor] {
                     return monitor ? monitor->snapshot() : gateway::tray::StatusState{};
+                }, [management = state->management.get()](const gateway::managementipc::Command& command) {
+                    return management ? management->execute(command)
+                                      : gateway::managementipc::Result{false, "unavailable", "Management IPC is unavailable"};
                 });
         } else if (LOWORD(wParam) == ExitCommandId) {
             DestroyWindow(window);
@@ -139,6 +146,7 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (state) {
             state->configurationWindow.close();
             state->monitor->stop();
+            state->management->stop();
         }
         {
             NOTIFYICONDATAW icon{};

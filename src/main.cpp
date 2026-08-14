@@ -3,6 +3,7 @@
 #include "gateway/ApplicationArtworkCache.h"
 #include "gateway/GatewayLifecycle.h"
 #include "gateway/GatewayProtocol.h"
+#include "gateway/ManagementIpcClient.h"
 #include "gateway/ServiceIpcServer.h"
 #include "gateway/WindowsServiceHost.h"
 #include "media/MediaSender.h"
@@ -264,6 +265,7 @@ public:
     explicit SignalingServer(const ProgramOptions& options, Logger logger)
         : sourceMode_(options.sourceMode)
         , moonlightOptions_{options.host, options.application}
+        , explicitMoonlightHost_(options.host.has_value())
         , identity_(sourceMode_ == MediaSourceMode::Moonlight
                         ? std::make_unique<gateway::moonlight::MoonlightIdentity>(
                             gateway::moonlight::MoonlightIdentity::resolveStorageDirectory(
@@ -296,6 +298,9 @@ public:
                     << " encoded packets";
             log(message.str());
         } else {
+            if (!moonlightOptions_.host) {
+                moonlightOptions_.host = identity_->configuredSunshineHost();
+            }
             log("Moonlight source selected");
             log("Moonlight identity path: " + identity_->storageDirectory().string());
         }
@@ -753,7 +758,7 @@ private:
         }
 
         sendSessionStatus(session, "connecting-sunshine");
-        auto options = moonlightOptions_;
+        auto options = configuredMoonlightOptions();
         options.applicationId = session->applicationId;
         options.settings = session->settings;
 
@@ -973,7 +978,7 @@ private:
 
         try {
             const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
-                *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                *identity_, configuredMoonlightOptions().host, [this](const std::string& message) {
                     log(message);
                 });
             status.sunshineDetected = true;
@@ -996,7 +1001,7 @@ private:
         }
 
         const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
-            *identity_, moonlightOptions_.host, [this](const std::string& message) {
+            *identity_, configuredMoonlightOptions().host, [this](const std::string& message) {
                 log(message);
             });
         if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
@@ -1033,7 +1038,7 @@ private:
         std::string hostId;
         try {
             const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
-                *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                *identity_, configuredMoonlightOptions().host, [this](const std::string& message) {
                     log(message);
                 });
             if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
@@ -1097,6 +1102,53 @@ private:
     }
 
 public:
+    gateway::managementipc::Result handleManagementCommand(
+        const gateway::managementipc::Command& command)
+    {
+        if (sourceMode_ != MediaSourceMode::Moonlight) {
+            return {false, "unsupported-source", "Sunshine management requires the Moonlight source"};
+        }
+        if (command.type == gateway::managementipc::CommandType::SetHost) {
+            if (!gateway::moonlight::MoonlightIdentity::isValidSunshineHost(command.host)) {
+                return {false, "invalid-host", "Enter a hostname or IPv4 address without a URL or port"};
+            }
+            try {
+                identity_->saveConfiguredSunshineHost(command.host);
+                if (!explicitMoonlightHost_) {
+                    std::lock_guard lock(moonlightOptionsMutex_);
+                    moonlightOptions_.host = command.host;
+                }
+                return {true, "saved", explicitMoonlightHost_
+                    ? "Host saved; the explicit --host value remains active until restart"
+                    : "Sunshine host saved"};
+            } catch (const std::exception&) {
+                return {false, "persistence-failed", "Unable to save the Sunshine host"};
+            }
+        }
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, configuredMoonlightOptions().host, [](const std::string&) {});
+            if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
+                return {false, "not-paired", "Sunshine is reachable but this Gateway is not paired"};
+            }
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            client.setHttpsPort(detected.serverInfo.httpsPort);
+            client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
+            (void)client.getServerInfo(true, std::chrono::seconds(5));
+            return {true, "reachable", "Sunshine is reachable and its pinned TLS connection succeeded"};
+        } catch (const std::exception& error) {
+            const std::string detail = error.what();
+            const bool tls = detail.find("certificate") != std::string::npos
+                || detail.find("SSL") != std::string::npos || detail.find("TLS") != std::string::npos;
+            const bool protocol = detail.find("XML") != std::string::npos
+                || detail.find("status") != std::string::npos;
+            return {false, tls ? "tls-pinning-failed" : protocol ? "protocol-failed" : "unreachable",
+                    tls ? "Sunshine TLS or certificate pinning failed" : protocol
+                        ? "Sunshine responded with an invalid protocol response"
+                        : "Sunshine is unreachable"};
+        }
+    }
+
     gateway::serviceipc::StatusSnapshot localServiceStatus()
     {
         gateway::serviceipc::StatusSnapshot snapshot;
@@ -1118,9 +1170,14 @@ public:
             return snapshot;
         }
 
+        const auto moonlightOptions = configuredMoonlightOptions();
+        if (moonlightOptions.host) {
+            snapshot.sunshineHost = *moonlightOptions.host;
+        }
+
         try {
             const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
-                *identity_, moonlightOptions_.host, [](const std::string&) {});
+                *identity_, moonlightOptions.host, [](const std::string&) {});
             snapshot.sunshineConnected = true;
             snapshot.sunshinePaired = detected.pairedHost.has_value()
                 && detected.serverInfo.pairStatus == 1;
@@ -1138,6 +1195,12 @@ public:
     }
 
 private:
+    gateway::moonlight::MoonlightSessionOptions configuredMoonlightOptions() const
+    {
+        const std::lock_guard lock(moonlightOptionsMutex_);
+        return moonlightOptions_;
+    }
+
     void sendInitialState(const std::shared_ptr<Session>& session)
     {
         sendJson(session, gateway::protocol::makeGatewayStatus(gatewayStatus(session)));
@@ -1430,7 +1493,7 @@ private:
 
         try {
             const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
-                *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                *identity_, configuredMoonlightOptions().host, [this](const std::string& message) {
                     log(message);
                 });
             if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
@@ -1686,6 +1749,8 @@ private:
 
     MediaSourceMode sourceMode_;
     gateway::moonlight::MoonlightSessionOptions moonlightOptions_;
+    bool explicitMoonlightHost_ = false;
+    mutable std::mutex moonlightOptionsMutex_;
     std::unique_ptr<gateway::moonlight::MoonlightIdentity> identity_;
     gateway::ApplicationArtworkCache artworkCache_;
     std::unique_ptr<moonlight::H264AnnexBReader> videoSource_;
@@ -1822,16 +1887,26 @@ int runGatewayRuntime(const ProgramOptions& options,
 {
     SignalingServer server(options, std::ref(logger));
     std::unique_ptr<gateway::serviceipc::ServiceIpcServer> serviceIpc;
+    std::unique_ptr<gateway::managementipc::ManagementIpcClient> managementIpc;
     if (options.hostMode == ProgramHostMode::Service) {
         serviceIpc = std::make_unique<gateway::serviceipc::ServiceIpcServer>(
             [&server] { return server.localServiceStatus(); });
         serviceIpc->start();
         logger("Local service IPC listening on \\\\.\\pipe\\MoonlightWebRTCGateway");
+        managementIpc = std::make_unique<gateway::managementipc::ManagementIpcClient>(
+            [&server](const gateway::managementipc::Command& command) {
+                return server.handleManagementCommand(command);
+            }, [&logger](const std::string& message) { logger(message); });
+        managementIpc->start();
+        logger("Management IPC client reconnecting to the interactive tray");
     }
     ready();
     server.wait(shutdown);
     if (serviceIpc) {
         serviceIpc->stop();
+    }
+    if (managementIpc) {
+        managementIpc->stop();
     }
     logger("Gateway runtime stopped");
     return 0;

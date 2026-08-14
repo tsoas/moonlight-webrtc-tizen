@@ -1,6 +1,7 @@
 #include "moonlight/control/MoonlightIdentity.h"
 
 #include <cstdlib>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -182,6 +183,7 @@ MoonlightIdentity::MoonlightIdentity(std::filesystem::path storageDirectory)
     , privateKeyPath_(storageDirectory_ / "client-private-key.pem")
     , uniqueIdPath_(storageDirectory_ / "client-unique-id.txt")
     , hostsPath_(storageDirectory_ / "paired-hosts.json")
+    , sunshineHostPath_(storageDirectory_ / "sunshine-host.txt")
 {
     loadOrCreate();
 }
@@ -491,6 +493,44 @@ void MoonlightIdentity::savePairedHost(const PairedSunshineHost& host)
         {"serverCertificatePem", host.serverCertificatePem},
     };
     writeTextFile(hostsPath_, hosts.dump(2) + "\n");
+}
+
+std::optional<std::string> MoonlightIdentity::configuredSunshineHost() const
+{
+    if (!std::filesystem::exists(sunshineHostPath_)) return std::nullopt;
+    std::string host = readTextFile(sunshineHostPath_);
+    while (!host.empty() && (host.back() == '\r' || host.back() == '\n')) host.pop_back();
+    return host.empty() ? std::nullopt : std::optional<std::string>(std::move(host));
+}
+
+void MoonlightIdentity::saveConfiguredSunshineHost(const std::string& host)
+{
+    if (!isValidSunshineHost(host)) {
+        throw std::invalid_argument("Invalid Sunshine host");
+    }
+    writeTextFile(sunshineHostPath_, host + "\n");
+}
+
+bool MoonlightIdentity::isValidSunshineHost(std::string_view host)
+{
+    if (host.empty() || host.size() > 253 || host.front() == '.' || host.back() == '.') return false;
+    std::size_t labelLength = 0;
+    bool labelStartsWithHyphen = false;
+    for (std::size_t index = 0; index < host.size(); ++index) {
+        const unsigned char character = static_cast<unsigned char>(host[index]);
+        if (character == '.') {
+            if (labelLength == 0 || labelLength > 63 || labelStartsWithHyphen
+                || host[index - 1] == '-') return false;
+            labelLength = 0;
+            labelStartsWithHyphen = false;
+        } else if (std::isalnum(character) || character == '-') {
+            if (labelLength == 0) labelStartsWithHyphen = character == '-';
+            ++labelLength;
+        } else {
+            return false;
+        }
+    }
+    return labelLength > 0 && labelLength <= 63 && !labelStartsWithHyphen && host.back() != '-';
 }
 
 } // namespace gateway::moonlight

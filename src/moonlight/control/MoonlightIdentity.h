@@ -40,6 +40,9 @@ public:
 
     std::optional<PairedSunshineHost> pairedHost(const std::string& serverUniqueId) const;
     void savePairedHost(const PairedSunshineHost& host);
+    std::optional<std::string> configuredSunshineHost() const;
+    void saveConfiguredSunshineHost(const std::string& host);
+    static bool isValidSunshineHost(std::string_view host);
 
 private:
     static void validateExistingStorageDirectory(const std::filesystem::path& directory);
@@ -52,6 +55,7 @@ private:
     std::filesystem::path privateKeyPath_;
     std::filesystem::path uniqueIdPath_;
     std::filesystem::path hostsPath_;
+    std::filesystem::path sunshineHostPath_;
     std::string certificatePem_;
     std::string privateKeyPem_;
     std::string uniqueId_;

@@ -25,6 +25,25 @@ to LocalService, SYSTEM, and Administrators. Local standard users receive only t
 named-pipe read mask: an open requests a snapshot, but no user-session process writes to the
 LocalService-owned endpoint. The DACL excludes remote callers.
 
+### Local Windows management IPC
+
+Configuration commands use a separate, tray-owned named pipe:
+`\\.\pipe\MoonlightWebRTCGateway.Management`. This does not change the status pipe,
+which remains read-only. The tray creates the management pipe with
+`PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL granting access only to its current
+logon SID and LocalService. It impersonates each connecting client and accepts only the
+LocalService SID. The service is the pipe client and verifies the server PID belongs to
+the active interactive session and is neither Session 0 nor a service identity before it
+accepts any command.
+
+Messages are a bounded (16 KiB) little-endian 32-bit length followed by JSON. Version 1
+accepts only `set-host` and `test` commands; every response is a structured `result` with
+the requested command, `ok`, a stable code, and a user-safe message. The service remains
+the sole writer of ProgramData and pairing material. `set-host` writes only
+`sunshine-host.txt`; `test` first validates Sunshine's protocol response and, when paired,
+performs an authenticated request using the existing pinned certificate. It does not pair,
+unpair, or mutate Sunshine state.
+
 ## Gateway startup
 
 Opening the WebSocket does not start Sunshine or WebRTC. The Gateway first sends:

@@ -356,6 +356,15 @@ int main()
         require(loadedHost && loadedHost->serverCertificatePem == firstCertificate
                     && loadedHost->lastAddress == "127.0.0.1",
                 "Paired Sunshine host persistence failed");
+        firstIdentity.saveConfiguredSunshineHost("sunshine.local");
+        require(gateway::moonlight::MoonlightIdentity(firstDirectory.path()).configuredSunshineHost()
+                    == "sunshine.local"
+                    && gateway::moonlight::MoonlightIdentity::isValidSunshineHost("192.168.1.20")
+                    && !gateway::moonlight::MoonlightIdentity::isValidSunshineHost("https://sunshine"),
+                "Configured Sunshine host persistence or validation failed");
+        bool invalidConfiguredHostRejected = false;
+        try { firstIdentity.saveConfiguredSunshineHost("sunshine:47990"); } catch (const std::exception&) { invalidConfiguredHostRejected = true; }
+        require(invalidConfiguredHostRejected, "Configured Sunshine host accepted a URL port");
 
         TemporaryDirectory secondDirectory;
         gateway::moonlight::MoonlightIdentity secondIdentity(secondDirectory.path());

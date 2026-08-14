@@ -65,6 +65,22 @@ target_compile_features(service_ipc_protocol PUBLIC cxx_std_20)
 target_include_directories(service_ipc_protocol PUBLIC src)
 target_link_libraries(service_ipc_protocol PUBLIC nlohmann_json::nlohmann_json)
 
+add_library(management_ipc_protocol
+    src/gateway/ManagementIpcProtocol.cpp
+)
+
+target_compile_features(management_ipc_protocol PUBLIC cxx_std_20)
+target_include_directories(management_ipc_protocol PUBLIC src)
+target_link_libraries(management_ipc_protocol PUBLIC nlohmann_json::nlohmann_json)
+
+add_library(management_ipc_client
+    src/gateway/ManagementIpcClient.cpp
+)
+
+target_compile_features(management_ipc_client PUBLIC cxx_std_20)
+target_include_directories(management_ipc_client PUBLIC src)
+target_link_libraries(management_ipc_client PUBLIC management_ipc_protocol advapi32 wtsapi32)
+
 add_library(service_ipc_server
     src/gateway/ServiceIpcServer.cpp
 )
@@ -146,6 +162,7 @@ target_link_libraries(moonlight_webrtc PRIVATE
     application_artwork_cache
     gateway_lifecycle
     gateway_protocol
+    management_ipc_client
     service_ipc_server
     h264_annex_b_reader
     moonlight_control
@@ -160,6 +177,7 @@ target_link_libraries(moonlight_webrtc PRIVATE
 
 add_executable(moonlight_webrtc_tray WIN32
     src/tray/ConfigurationWindow.cpp
+    src/tray/ManagementIpcServer.cpp
     src/tray/ServiceIpcClient.cpp
     src/tray/StatusMonitor.cpp
     src/tray/TrayMain.cpp
@@ -168,10 +186,12 @@ add_executable(moonlight_webrtc_tray WIN32
 target_compile_features(moonlight_webrtc_tray PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc_tray PRIVATE
     service_ipc_protocol
+    management_ipc_protocol
     nlohmann_json::nlohmann_json
     dwmapi
     ole32
     shell32
+    advapi32
 )
 
 set_target_properties(moonlight_webrtc_tray PROPERTIES
@@ -290,4 +310,10 @@ if(BUILD_TESTING)
         NAME service_ipc_protocol_test
         COMMAND service_ipc_protocol_test
     )
+
+    add_executable(management_ipc_protocol_test
+        tests/ManagementIpcProtocolTest.cpp
+    )
+    target_link_libraries(management_ipc_protocol_test PRIVATE management_ipc_protocol)
+    add_test(NAME management_ipc_protocol_test COMMAND management_ipc_protocol_test)
 endif()
