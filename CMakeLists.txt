@@ -43,6 +43,13 @@ target_compile_features(gateway_protocol PUBLIC cxx_std_20)
 target_include_directories(gateway_protocol PUBLIC src)
 target_link_libraries(gateway_protocol PUBLIC nlohmann_json::nlohmann_json)
 
+add_library(application_artwork_cache
+    src/gateway/ApplicationArtworkCache.cpp
+)
+
+target_compile_features(application_artwork_cache PUBLIC cxx_std_20)
+target_include_directories(application_artwork_cache PUBLIC src)
+
 add_library(moonlight_video_profile
     src/moonlight/MoonlightVideoProfile.cpp
 )
@@ -109,6 +116,7 @@ add_executable(moonlight_webrtc
 
 target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
+    application_artwork_cache
     gateway_protocol
     h264_annex_b_reader
     moonlight_control
@@ -189,6 +197,16 @@ if(BUILD_TESTING)
     add_test(
         NAME gateway_protocol_test
         COMMAND gateway_protocol_test
+    )
+
+    add_executable(application_artwork_cache_test
+        tests/ApplicationArtworkCacheTest.cpp
+    )
+    target_link_libraries(application_artwork_cache_test PRIVATE application_artwork_cache)
+
+    add_test(
+        NAME application_artwork_cache_test
+        COMMAND application_artwork_cache_test
     )
 
     add_executable(webrtc_media_sender_test

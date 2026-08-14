@@ -21,6 +21,7 @@ namespace {
 
 constexpr auto DefaultRequestTimeout = std::chrono::seconds(5);
 constexpr auto LaunchTimeout = std::chrono::seconds(120);
+constexpr std::size_t MaxArtworkBytes = 8 * 1024 * 1024;
 
 struct CurlGlobalState {
     CurlGlobalState()
@@ -158,6 +159,18 @@ std::string lowercase(std::string value)
     return value;
 }
 
+std::string normalizedContentType(std::string_view contentType)
+{
+    const auto separator = contentType.find(';');
+    std::string normalized(contentType.substr(0, separator));
+    const auto first = normalized.find_first_not_of(" \t\r\n");
+    const auto last = normalized.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    return lowercase(normalized.substr(first, last - first + 1));
+}
+
 std::string requiredText(const pugi::xml_node& root, const char* name)
 {
     const auto node = root.child(name);
@@ -249,16 +262,21 @@ std::string SunshineHttpClient::requestHttp(const std::string& command,
 std::string SunshineHttpClient::requestHttps(const std::string& command,
                                               const Query& query,
                                               std::chrono::milliseconds timeout,
-                                              const std::string& rawQuerySuffix)
+                                              const std::string& rawQuerySuffix,
+                                              std::string* responseContentType,
+                                              long* responseStatus)
 {
-    return request(true, command, query, timeout, rawQuerySuffix);
+    return request(
+        true, command, query, timeout, rawQuerySuffix, responseContentType, responseStatus);
 }
 
 std::string SunshineHttpClient::request(bool https,
                                         const std::string& command,
                                         const Query& query,
                                         std::chrono::milliseconds timeout,
-                                        const std::string& rawQuerySuffix)
+                                        const std::string& rawQuerySuffix,
+                                        std::string* responseContentType,
+                                        long* responseStatus)
 {
     if (https && (httpsPort_ == 0 || pinnedServerCertificatePem_.empty())) {
         throw std::runtime_error(
@@ -331,6 +349,15 @@ std::string SunshineHttpClient::request(bool https,
         throw std::runtime_error("Sunshine HTTP request failed: " + detail);
     }
 
+    if (responseContentType) {
+        char* contentType = nullptr;
+        curl_easy_getinfo(handle.get(), CURLINFO_CONTENT_TYPE, &contentType);
+        *responseContentType = contentType ? contentType : "";
+    }
+    if (responseStatus) {
+        curl_easy_getinfo(handle.get(), CURLINFO_RESPONSE_CODE, responseStatus);
+    }
+
     return response;
 }
 
@@ -352,6 +379,57 @@ std::vector<SunshineApp> SunshineHttpClient::getAppList()
 {
     const std::string xml = requestHttps("applist", {}, DefaultRequestTimeout);
     return parseAppListXml(xml);
+}
+
+SunshineHttpClient::AppArtwork SunshineHttpClient::getAppArtwork(const std::string& appId)
+{
+    if (appId.empty()) {
+        throw std::runtime_error("Sunshine application ID must not be empty");
+    }
+
+    std::string contentType;
+    long statusCode = 0;
+    const std::string bytes = requestHttps(
+        "appasset",
+        makeAppArtworkQuery(appId),
+        DefaultRequestTimeout,
+        {},
+        &contentType,
+        &statusCode);
+    if (bytes.empty() || bytes.size() > MaxArtworkBytes) {
+        throw std::runtime_error("Sunshine application artwork has an invalid size");
+    }
+
+    AppArtwork artwork;
+    artwork.requestTarget = appArtworkRequestTarget(appId);
+    artwork.httpStatus = statusCode;
+    artwork.bytes.assign(bytes.begin(), bytes.end());
+    const std::string headerMimeType = normalizedContentType(contentType);
+    if (!headerMimeType.empty() && !isSupportedArtworkMimeType(headerMimeType)) {
+        throw std::runtime_error("Sunshine application artwork has an unsupported MIME type");
+    }
+    if (artwork.bytes.size() >= 3 && artwork.bytes[0] == 0xFF && artwork.bytes[1] == 0xD8
+        && artwork.bytes[2] == 0xFF) {
+        artwork.mimeType = "image/jpeg";
+    } else if (artwork.bytes.size() >= 8 && artwork.bytes[0] == 0x89 && artwork.bytes[1] == 0x50
+               && artwork.bytes[2] == 0x4E && artwork.bytes[3] == 0x47
+               && artwork.bytes[4] == 0x0D && artwork.bytes[5] == 0x0A
+               && artwork.bytes[6] == 0x1A && artwork.bytes[7] == 0x0A) {
+        artwork.mimeType = "image/png";
+    } else if (artwork.bytes.size() >= 12 && artwork.bytes[0] == 'R'
+               && artwork.bytes[1] == 'I' && artwork.bytes[2] == 'F'
+               && artwork.bytes[3] == 'F' && artwork.bytes[8] == 'W'
+               && artwork.bytes[9] == 'E' && artwork.bytes[10] == 'B'
+               && artwork.bytes[11] == 'P') {
+        artwork.mimeType = "image/webp";
+    }
+    if (!headerMimeType.empty() && headerMimeType != artwork.mimeType) {
+        throw std::runtime_error("Sunshine application artwork MIME type does not match its data");
+    }
+    if (!isLikelyArtworkImage(artwork.mimeType, artwork.bytes)) {
+        throw std::runtime_error("Sunshine application artwork is not a supported image");
+    }
+    return artwork;
 }
 
 std::string SunshineHttpClient::launchOrResume(
@@ -452,9 +530,27 @@ std::vector<SunshineApp> SunshineHttpClient::parseAppListXml(const std::string& 
         if (!titleNode || !idNode) {
             throw std::runtime_error("Sunshine /applist contains an incomplete App entry");
         }
-        applications.push_back({titleNode.text().as_string(), idNode.text().as_int()});
+        const std::string appId = idNode.text().as_string();
+        if (appId.empty()) {
+            throw std::runtime_error("Sunshine /applist contains an empty App ID");
+        }
+        applications.push_back({titleNode.text().as_string(), appId});
     }
     return applications;
+}
+
+SunshineHttpClient::Query SunshineHttpClient::makeAppArtworkQuery(const std::string& appId)
+{
+    if (appId.empty()) {
+        throw std::runtime_error("Sunshine application ID must not be empty");
+    }
+    return {{"appid", appId}, {"AssetType", "2"}, {"AssetIdx", "0"}};
+}
+
+std::string SunshineHttpClient::appArtworkRequestTarget(const std::string& appId)
+{
+    makeAppArtworkQuery(appId);
+    return "/appasset?appid=" + appId + "&AssetType=2&AssetIdx=0";
 }
 
 const SunshineApp* SunshineHttpClient::findApplication(
@@ -475,9 +571,19 @@ const SunshineApp* SunshineHttpClient::findApplicationById(
 {
     const auto iterator = std::find_if(
         applications.begin(), applications.end(), [id](const SunshineApp& application) {
-            return application.id == id;
+            return application.id == std::to_string(id);
         });
     return iterator == applications.end() ? nullptr : &*iterator;
+}
+
+int SunshineHttpClient::numericApplicationId(const std::string& appId)
+{
+    int value = 0;
+    const auto result = std::from_chars(appId.data(), appId.data() + appId.size(), value);
+    if (result.ec != std::errc() || result.ptr != appId.data() + appId.size() || value < 0) {
+        throw std::runtime_error("Sunshine application ID cannot be used for session launch");
+    }
+    return value;
 }
 
 std::string SunshineHttpClient::xmlValue(const std::string& xml,
@@ -544,6 +650,30 @@ bool SunshineHttpClient::certificatesMatch(const std::string& firstPem,
                                             const std::string& secondPem)
 {
     return certificateDer(firstPem) == certificateDer(secondPem);
+}
+
+bool SunshineHttpClient::isSupportedArtworkMimeType(std::string_view contentType)
+{
+    const std::string normalized = normalizedContentType(contentType);
+    return normalized == "image/jpeg" || normalized == "image/png" || normalized == "image/webp";
+}
+
+bool SunshineHttpClient::isLikelyArtworkImage(
+    std::string_view mimeType,
+    const std::vector<std::uint8_t>& bytes)
+{
+    const std::string normalized = normalizedContentType(mimeType);
+    if (normalized == "image/jpeg") {
+        return bytes.size() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+    }
+    if (normalized == "image/png") {
+        return bytes.size() >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E
+            && bytes[3] == 0x47 && bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A
+            && bytes[7] == 0x0A;
+    }
+    return normalized == "image/webp" && bytes.size() >= 12 && bytes[0] == 'R'
+        && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'W'
+        && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P';
 }
 
 } // namespace gateway::moonlight

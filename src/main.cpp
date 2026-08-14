@@ -1,5 +1,6 @@
 #include "H264AnnexBReader.h"
 #include "OpusFileReader.h"
+#include "gateway/ApplicationArtworkCache.h"
 #include "gateway/GatewayProtocol.h"
 #include "media/MediaSender.h"
 #include "moonlight/MoonlightMediaBridge.h"
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <rtc/rtc.hpp>
 
 namespace {
@@ -49,7 +51,31 @@ constexpr auto VideoSamplePath = "samples/test-720p60.h264";
 constexpr auto AudioSamplePath = "samples/test-tone-48k-stereo.opus";
 constexpr auto RtpCname = "moonlight-webrtc";
 constexpr auto MediaStreamId = "stream1";
+// Artwork is capped at 8 MiB before Base64 and JSON framing expand it for WebSocket transport.
+constexpr std::size_t MaxGatewayWebSocketMessageSize = 12 * 1024 * 1024;
 volatile std::sig_atomic_t ShutdownRequested = 0;
+
+std::string base64Encode(const std::vector<std::uint8_t>& bytes)
+{
+    if (bytes.empty()) {
+        return {};
+    }
+
+    std::string encoded(4 * ((bytes.size() + 2) / 3), '\0');
+    const int size = EVP_EncodeBlock(
+        reinterpret_cast<unsigned char*>(encoded.data()), bytes.data(), static_cast<int>(bytes.size()));
+    if (size <= 0) {
+        throw std::runtime_error("Unable to encode Sunshine application artwork");
+    }
+    encoded.resize(static_cast<std::size_t>(size));
+    return encoded;
+}
+
+int runningSunshineApplicationId(const gateway::moonlight::SunshineServerInfo& serverInfo)
+{
+    // currentgame is meaningful only while Sunshine reports an active stream.
+    return serverInfo.state.ends_with("_SERVER_BUSY") ? serverInfo.currentGame : 0;
+}
 
 void requestShutdown(int)
 {
@@ -247,6 +273,7 @@ private:
         configuration.port = 8000;
         configuration.enableTls = false;
         configuration.bindAddress = "0.0.0.0";
+        configuration.maxMessageSize = MaxGatewayWebSocketMessageSize;
         return configuration;
     }
 
@@ -893,6 +920,10 @@ private:
             status.sunshineDetected = true;
             status.sunshinePaired = detected.pairedHost.has_value()
                 && detected.serverInfo.pairStatus == 1;
+            const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
+            if (runningAppId != 0) {
+                status.runningAppId = std::to_string(runningAppId);
+            }
         } catch (const std::exception& error) {
             log("Sunshine status unavailable: " + std::string(error.what()));
         }
@@ -918,12 +949,92 @@ private:
         client.setPinnedServerCertificate(
             detected.pairedHost->serverCertificatePem);
 
+        const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
         std::vector<gateway::protocol::Application> result;
         for (const auto& application : client.getAppList()) {
-            result.push_back(
-                {std::to_string(application.id), application.title});
+            const std::string& appId = application.id;
+            const auto cached = artworkCache_.find(detected.serverInfo.uniqueId, appId);
+            result.push_back({appId,
+                              application.title,
+                              cached && cached->available,
+                              application.id == std::to_string(runningAppId)});
         }
         return result;
+    }
+
+    void sendApplicationArtwork(
+        const std::shared_ptr<Session>& session,
+        const gateway::protocol::GetAppArtworkRequest& request)
+    {
+        if (sourceMode_ == MediaSourceMode::Test) {
+            sendJson(session, gateway::protocol::makeAppArtwork(request.appId, false));
+            return;
+        }
+
+        std::string hostId;
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                    log(message);
+                });
+            if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
+                throw std::runtime_error("Moonlight WebRTC Gateway is not paired with Sunshine");
+            }
+            hostId = detected.serverInfo.uniqueId;
+
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            client.setHttpsPort(detected.serverInfo.httpsPort);
+            client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
+            auto applications = client.getAppList();
+            const auto application = std::ranges::find_if(
+                applications, [&request](const auto& candidate) {
+                    return candidate.id == request.appId;
+                });
+            if (application == applications.end()) {
+                throw std::runtime_error("Sunshine /applist no longer contains the requested app ID");
+            }
+
+            const std::string target =
+                gateway::moonlight::SunshineHttpClient::appArtworkRequestTarget(request.appId);
+            log("[Artwork] App: " + application->title);
+            log("[Artwork] Sunshine applist ID: " + application->id);
+            log("[Artwork] Requested appasset ID: " + request.appId);
+            log("[Artwork] URL: " + target);
+
+            auto artwork = artworkCache_.find(hostId, request.appId);
+            if (!artwork) {
+                const auto sunshineArtwork = client.getAppArtwork(request.appId);
+                artwork = gateway::ApplicationArtwork{
+                    true, sunshineArtwork.mimeType, sunshineArtwork.bytes};
+                artworkCache_.store(hostId, request.appId, *artwork);
+                log("[Artwork] HTTP status: " + std::to_string(sunshineArtwork.httpStatus));
+                log("[Artwork] Content-Type: " + sunshineArtwork.mimeType);
+                log("[Artwork] Bytes received: "
+                    + std::to_string(sunshineArtwork.bytes.size()));
+            } else {
+                log("[Artwork] Cache hit: " + request.appId);
+                log("[Artwork] Content-Type: " + artwork->mimeType);
+                log("[Artwork] Bytes received: " + std::to_string(artwork->bytes.size()));
+            }
+
+            if (artwork->available) {
+                sendJson(session,
+                         gateway::protocol::makeAppArtwork(
+                             request.appId,
+                             true,
+                             artwork->mimeType,
+                             base64Encode(artwork->bytes)));
+            } else {
+                sendJson(session, gateway::protocol::makeAppArtwork(request.appId, false));
+            }
+        } catch (const std::exception& error) {
+            log("Sunshine artwork unavailable for application " + request.appId + ": "
+                + error.what());
+            if (!hostId.empty()) {
+                artworkCache_.store(hostId, request.appId, {});
+            }
+            sendJson(session, gateway::protocol::makeAppArtwork(request.appId, false));
+        }
     }
 
     void sendInitialState(const std::shared_ptr<Session>& session)
@@ -1138,6 +1249,10 @@ private:
             if (std::holds_alternative<gateway::protocol::GetAppsRequest>(
                     message.payload)) {
                 sendApplications(session);
+            } else if (const auto* artwork =
+                           std::get_if<gateway::protocol::GetAppArtworkRequest>(
+                               &message.payload)) {
+                sendApplicationArtwork(session, *artwork);
             } else if (const auto* start =
                            std::get_if<gateway::protocol::StartSessionRequest>(
                                &message.payload)) {
@@ -1268,9 +1383,13 @@ private:
 
     void sendJson(const std::shared_ptr<Session>& session, const Json& message)
     {
+        const std::string payload = message.dump();
         const std::lock_guard lock(session->sendMutex);
         if (session->socket && session->socket->isOpen()) {
-            session->socket->send(message.dump());
+            if (payload.size() > MaxGatewayWebSocketMessageSize) {
+                throw std::runtime_error("Gateway WebSocket message exceeds its configured limit");
+            }
+            session->socket->send(payload);
         }
     }
 
@@ -1287,6 +1406,7 @@ private:
     MediaSourceMode sourceMode_;
     gateway::moonlight::MoonlightSessionOptions moonlightOptions_;
     std::unique_ptr<gateway::moonlight::MoonlightIdentity> identity_;
+    gateway::ApplicationArtworkCache artworkCache_;
     std::unique_ptr<moonlight::H264AnnexBReader> videoSource_;
     std::unique_ptr<moonlight::OpusFileReader> audioSource_;
     std::mutex logMutex_;
@@ -1364,7 +1484,7 @@ int runMoonlightPairing(const ProgramOptions& options)
     auto applications = httpClient->getAppList();
     for (const auto& application : applications) {
         logger("Sunshine application: " + application.title + " (ID "
-               + std::to_string(application.id) + ")");
+               + application.id + ")");
     }
     const auto* selectedApplication =
         gateway::moonlight::SunshineHttpClient::findApplication(
@@ -1374,7 +1494,7 @@ int runMoonlightPairing(const ProgramOptions& options)
             "Requested Sunshine application was not found: " + options.application);
     }
     logger("Selected Sunshine application: " + selectedApplication->title + " (ID "
-           + std::to_string(selectedApplication->id) + ")");
+           + selectedApplication->id + ")");
     return 0;
 }
 

@@ -41,6 +41,30 @@
     }
   }
 
+  function restoreArtworkFallback(card, art, image) {
+    if (image.parentNode === art) {
+      art.removeChild(image);
+    }
+    art.classList.remove("has-artwork");
+    art.classList.add("fallback");
+    if (!art.firstChild || art.firstChild.nodeType !== 3) {
+      art.insertBefore(
+        document.createTextNode(String(card.dataset.applicationTitle || "?").slice(0, 1).toUpperCase()),
+        art.firstChild
+      );
+    }
+  }
+
+  function createArtworkImage(card, art, artworkDataUrl) {
+    const image = document.createElement("img");
+    image.src = artworkDataUrl;
+    image.alt = "";
+    image.addEventListener("error", function () {
+      restoreArtworkFallback(card, art, image);
+    });
+    return image;
+  }
+
   function TizenUi(options) {
     this.options = options;
     this.currentView = "gateway";
@@ -135,18 +159,23 @@
       card.type = "button";
       card.className = "application-card focusable";
       card.dataset.applicationId = String(application.id);
+      card.dataset.applicationTitle = String(application.title || "?");
       card.setAttribute("aria-label", "Launch " + String(application.title));
       const art = document.createElement("span");
       art.className = "application-art fallback";
-      if (application.artworkUrl || application.boxArtUrl || application.imageUrl) {
-        const image = document.createElement("img");
-        image.src = application.artworkUrl || application.boxArtUrl || application.imageUrl;
-        image.alt = "";
+      if (application.artworkDataUrl) {
+        const image = createArtworkImage(card, art, application.artworkDataUrl);
         art.classList.remove("fallback");
+        art.classList.add("has-artwork");
         art.appendChild(image);
       } else {
         art.textContent = String(application.title || "?").slice(0, 1).toUpperCase();
       }
+      const running = document.createElement("span");
+      running.className = "application-running";
+      running.textContent = "\u25B6 Running";
+      running.hidden = !application.running;
+      art.appendChild(running);
       const name = document.createElement("span");
       name.className = "application-name";
       name.textContent = String(application.title || "Untitled application");
@@ -166,6 +195,51 @@
     if (this.currentView === "applications") {
       this.focusDefault("applications");
     }
+  };
+
+  TizenUi.prototype.applicationCard = function (appId) {
+    return Array.prototype.find.call(
+      this.applicationsGrid.querySelectorAll("[data-application-id]"),
+      function (card) { return card.dataset.applicationId === String(appId); }
+    ) || null;
+  };
+
+  TizenUi.prototype.updateApplicationArtwork = function (appId, artworkDataUrl) {
+    if (!artworkDataUrl) {
+      return;
+    }
+    const card = this.applicationCard(appId);
+    if (!card) {
+      return;
+    }
+    const art = card.querySelector(".application-art");
+    const existingImage = art.querySelector("img");
+    if (existingImage) {
+      existingImage.src = artworkDataUrl;
+      return;
+    }
+    art.classList.remove("fallback");
+    art.classList.add("has-artwork");
+    const fallback = art.firstChild;
+    if (fallback) {
+      art.removeChild(fallback);
+    }
+    const image = createArtworkImage(card, art, artworkDataUrl);
+    art.insertBefore(image, art.firstChild);
+  };
+
+  TizenUi.prototype.setRunningApplication = function (runningAppId) {
+    Array.prototype.forEach.call(
+      this.applicationsGrid.querySelectorAll("[data-application-id]"),
+      function (card) {
+        const running = card.dataset.applicationId === String(runningAppId || "");
+        card.classList.toggle("is-running", running);
+        const badge = card.querySelector(".application-running");
+        if (badge) {
+          badge.hidden = !running;
+        }
+      }
+    );
   };
 
   TizenUi.prototype.showView = function (view) {

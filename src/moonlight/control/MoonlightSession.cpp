@@ -268,7 +268,7 @@ void MoonlightSession::start()
         auto applications = httpClient->getAppList();
         for (const auto& application : applications) {
             log("Sunshine application: " + application.title + " (ID "
-                + std::to_string(application.id) + ")");
+                + application.id + ")");
         }
 
         const SunshineApp* application = options_.applicationId
@@ -282,7 +282,7 @@ void MoonlightSession::start()
 
         std::string verb = "launch";
         if (detected.serverInfo.currentGame != 0) {
-            if (detected.serverInfo.currentGame != application->id) {
+            if (std::to_string(detected.serverInfo.currentGame) != application->id) {
                 throw std::runtime_error(
                     "Sunshine is already streaming a different application");
             }
@@ -301,7 +301,7 @@ void MoonlightSession::start()
         log("Host game optimizations: DISABLED");
         const std::string rtspSessionUrl = httpClient->launchOrResume(
             verb,
-            application->id,
+            SunshineHttpClient::numericApplicationId(application->id),
             streamConfiguration_,
             HostGameOptimizationsEnabled);
         log("Sunshine application " + application->title

@@ -7,6 +7,7 @@ const path = require("path");
 global.window = global;
 require("../tizen/ui.js");
 require("../tizen/preferences.js");
+require("../tizen/application-artwork.js");
 
 const testing = global.TizenUi.testing;
 
@@ -33,6 +34,7 @@ const html = fs.readFileSync(path.join(__dirname, "../tizen/index.html"), "utf8"
 const config = fs.readFileSync(path.join(__dirname, "../tizen/config.xml"), "utf8");
 const uiSource = fs.readFileSync(path.join(__dirname, "../tizen/ui.js"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "../tizen/app.js"), "utf8");
+const uiCss = fs.readFileSync(path.join(__dirname, "../tizen/ui.css"), "utf8");
 assert.ok(html.includes('id="settings-screen"'), "settings view is missing");
 assert.ok(html.includes("Moonlight WebRTC Client"), "the Client title is missing from the UI");
 assert.ok(!html.includes("Moonlight WebRTC Tizen"), "the old visible Tizen title remains");
@@ -49,6 +51,8 @@ assert.ok(html.includes('aria-disabled="true"'),
 assert.ok(html.includes('id="stream-menu"') && html.includes('id="diagnostics-button"'),
   "the streaming Back menu and statistics control must remain available");
 assert.ok(html.includes('id="toast-region"'), "notification region is missing");
+assert.ok(html.includes('src="application-artwork.js"'),
+  "the Applications screen must load the Gateway artwork transport");
 assert.ok(uiSource.includes("this.ensureGatewayFocus();"),
   "the first selectable gateway must receive initial focus when it becomes available");
 assert.ok(uiSource.includes("TizenUi.prototype.focusSettingsCategory"),
@@ -85,6 +89,24 @@ assert.ok(appSource.includes("if (sessionState === \"streaming\") {\n    stopCur
   "the gamepad stop shortcut must reuse the regular stop-session path");
 assert.ok(appSource.includes("function handleMouseModeChanged(record, active)"),
   "mouse mode transitions must route through the existing toast system");
+assert.ok(appSource.includes('type === "app-artwork"'),
+  "Gateway artwork responses must update application cards asynchronously");
+assert.ok(appSource.includes("setRunningApplication(message.runningAppId)"),
+  "Gateway running application state must reach the cards");
+assert.ok(appSource.includes("setRunningApplication(null);"),
+  "normal session cleanup must clear stale running state before refreshing Sunshine");
+assert.ok(uiSource.includes("application-running"),
+  "running applications require a non-focusable visual indicator");
+assert.ok(uiSource.indexOf('card.appendChild(art);') < uiSource.indexOf('card.appendChild(name);'),
+  "application artwork must render before its title in the same focusable item");
+assert.ok(uiCss.includes("aspect-ratio:2 / 3"),
+  "application artwork tiles must use stable portrait geometry");
+assert.ok(uiCss.includes(".application-art img { width:100%; height:100%; object-fit:cover; }"),
+  "application artwork must fill its tile without distortion");
+assert.ok(uiCss.includes(".application-card:focus .application-art"),
+  "application focus must outline the artwork tile rather than the title");
+assert.ok(uiCss.includes("text-overflow:ellipsis"),
+  "long application titles must remain constrained to the tile width");
 
 function storage() {
   const values = new Map();

@@ -126,6 +126,16 @@ ClientMessage parseClientMessage(std::string_view text)
         if (type == "get-apps") {
             return {type, GetAppsRequest{}};
         }
+        if (type == "get-app-artwork") {
+            if (!message.at("appId").is_string()) {
+                throw ProtocolError("invalid-message", "appId must be a string");
+            }
+            const auto appId = message.at("appId").get<std::string>();
+            if (appId.empty()) {
+                throw ProtocolError("invalid-message", "appId must not be empty");
+            }
+            return {type, GetAppArtworkRequest{appId}};
+        }
         if (type == "stop-session") {
             return {type, StopSessionRequest{}};
         }
@@ -165,6 +175,9 @@ Json makeGatewayStatus(const GatewayStatus& status)
                     {"sunshineDetected", status.sunshineDetected},
                     {"sunshinePaired", status.sunshinePaired},
                     {"sessionActive", status.sessionActive}});
+    if (status.runningAppId) {
+        message["runningAppId"] = *status.runningAppId;
+    }
     return message;
 }
 
@@ -202,8 +215,23 @@ Json makeApps(const std::vector<Application>& applications)
     auto message = envelope("apps");
     message["apps"] = Json::array();
     for (const auto& application : applications) {
-        message["apps"].push_back(
-            {{"id", application.id}, {"title", application.title}});
+        message["apps"].push_back({{"id", application.id},
+                                   {"title", application.title},
+                                   {"artworkAvailable", application.artworkAvailable},
+                                   {"running", application.running}});
+    }
+    return message;
+}
+
+Json makeAppArtwork(std::string_view appId,
+                    bool available,
+                    std::string_view mimeType,
+                    std::string_view base64Data)
+{
+    auto message = envelope("app-artwork");
+    message.update({{"appId", appId}, {"available", available}});
+    if (available) {
+        message.update({{"mimeType", mimeType}, {"data", base64Data}});
     }
     return message;
 }

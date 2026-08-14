@@ -42,8 +42,35 @@ Client request:
 Gateway response (entries come directly from Sunshine):
 
 ```json
-{"version":1,"type":"apps","apps":[{"id":"0","title":"Desktop"}]}
+{"version":1,"type":"apps","apps":[{"id":"0","title":"Desktop","artworkAvailable":false,"running":false}]}
 ```
+
+`id` remains Sunshine's exact opaque application ID as returned by `/applist`; the Gateway
+does not derive it from application order or convert it before an artwork request. `running` is derived from Sunshine's
+authenticated `serverinfo` current application while the server reports an active stream.
+`artworkAvailable` reports only the Gateway's current in-memory cache state, so the
+application list stays small and renders without waiting for image downloads.
+
+Artwork is fetched lazily through the same Gateway WebSocket. The TV requests one asset at a
+time:
+
+```json
+{"version":1,"type":"get-app-artwork","appId":"0"}
+```
+
+The Gateway retrieves Sunshine's authenticated GameStream `appasset` resource with
+`appid`, `AssetType=2`, and `AssetIdx=0`, using the existing Moonlight identity and pinned
+Sunshine certificate. It validates JPEG, PNG, or WebP media before returning a display-only
+response:
+
+```json
+{"version":1,"type":"app-artwork","appId":"0","available":true,"mimeType":"image/jpeg","data":"...base64..."}
+```
+
+Missing, malformed, or unavailable artwork returns `"available":false`. This never fails
+the application list; the TV keeps its normal fallback card. The Gateway caches successful
+and unavailable results in memory by Sunshine host identity plus app ID. The TV never connects
+to Sunshine or receives a Sunshine URL.
 
 ## Start a session
 

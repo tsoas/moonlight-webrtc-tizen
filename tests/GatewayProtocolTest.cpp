@@ -235,6 +235,16 @@ int main()
             R"({"version":1,"type":"get-apps"})");
         require(std::holds_alternative<gateway::protocol::GetAppsRequest>(getApps.payload),
                 "get-apps parsing failed");
+        const auto getArtwork = gateway::protocol::parseClientMessage(
+            R"({"version":1,"type":"get-app-artwork","appId":"7"})");
+        require(std::get<gateway::protocol::GetAppArtworkRequest>(getArtwork.payload).appId == "7",
+                "get-app-artwork parsing failed");
+        requireProtocolError(
+            [] {
+                gateway::protocol::parseClientMessage(
+                    R"({"version":1,"type":"get-app-artwork","appId":""})");
+            },
+            "invalid-message");
         const auto stop = gateway::protocol::parseClientMessage(
             R"({"version":1,"type":"stop-session"})");
         require(std::holds_alternative<gateway::protocol::StopSessionRequest>(stop.payload),
@@ -386,6 +396,34 @@ int main()
                     && capabilities.at("videoModes").at(3).at("hdrExperimental")
                            .get<bool>(),
                 "High-resolution capability defaults are incorrect");
+
+        const auto apps = gateway::protocol::makeApps(
+            {{"7", "Desktop", true, true}, {"8", "Steam", false, false}});
+        require(apps.at("apps").at(0).at("id") == "7"
+                    && apps.at("apps").at(0).at("artworkAvailable") == true
+                    && apps.at("apps").at(0).at("running") == true
+                    && apps.at("apps").at(1).at("artworkAvailable") == false
+                    && apps.at("apps").at(1).at("running") == false,
+                "Application metadata must preserve artwork and running state");
+        const auto artwork = gateway::protocol::makeAppArtwork(
+            "7", true, "image/jpeg", "/9j/");
+        require(artwork.at("type") == "app-artwork" && artwork.at("appId") == "7"
+                    && artwork.at("available") == true && artwork.at("mimeType") == "image/jpeg"
+                    && artwork.at("data") == "/9j/",
+                "Application artwork response is incorrect");
+        const std::string largeArtworkData(1024 * 1024, 'A');
+        const auto largeArtwork = gateway::protocol::makeAppArtwork(
+            "large-artwork", true, "image/png", largeArtworkData);
+        require(largeArtwork.dump().size() > largeArtworkData.size()
+                    && largeArtwork.at("data") == largeArtworkData,
+                "Artwork protocol must preserve large Base64 payloads for WebSocket transport");
+        const auto missingArtwork = gateway::protocol::makeAppArtwork("8", false);
+        require(missingArtwork.at("available") == false && !missingArtwork.contains("data"),
+                "Missing artwork must remain a small fallback response");
+        gateway::protocol::GatewayStatus runningStatus;
+        runningStatus.runningAppId = "7";
+        require(gateway::protocol::makeGatewayStatus(runningStatus).at("runningAppId") == "7",
+                "Gateway status must expose the current Sunshine application");
 
         std::cout << "Gateway protocol tests passed\n";
         return 0;

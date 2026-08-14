@@ -138,6 +138,8 @@ let updatingCodecOptions = false;
 let lastStatisticsConsoleTime = 0;
 let applications = [];
 let ui = null;
+let artworkLoader = null;
+let runningAppId = null;
 let currentGatewayName = "Moonlight Gateway";
 let savedPreferences = preferences.load();
 
@@ -308,6 +310,10 @@ async function handleGatewayMessage(text) {
     applyCapabilities(message);
   } else if (message.type === "apps") {
     applyApplications(message.apps);
+  } else if (message.type === "app-artwork") {
+    if (artworkLoader) {
+      artworkLoader.handleResponse(message);
+    }
   } else if (message.type === "session-status") {
     handleSessionStatus(message);
   } else if (message.type === "offer") {
@@ -332,6 +338,9 @@ function handleGatewayStatus(message) {
   }
   if (ui) {
     ui.setSunshineState(sunshineStateElement.textContent);
+  }
+  if (Object.prototype.hasOwnProperty.call(message, "runningAppId")) {
+    setRunningApplication(message.runningAppId);
   }
   updateGatewayCard(message);
   updatePlayAvailability();
@@ -479,7 +488,19 @@ function applySelectedVideoMode(preferencesToRestore) {
 }
 
 function applyApplications(nextApplications) {
-  applications = Array.isArray(nextApplications) ? nextApplications : [];
+  const incoming = Array.isArray(nextApplications) ? nextApplications : [];
+  const hasRunningState = incoming.some(function (application) {
+    return Object.prototype.hasOwnProperty.call(application, "running");
+  });
+  if (hasRunningState) {
+    const running = incoming.find(function (application) { return application.running; });
+    runningAppId = running ? String(running.id) : null;
+  }
+  applications = incoming.map(function (application) {
+    return Object.assign({}, application, {
+      running: String(application.id) === String(runningAppId || ""),
+    });
+  });
   appSelect.innerHTML = "";
   if (applications.length === 0) {
     appsLoaded = false;
@@ -511,6 +532,20 @@ function applyApplications(nextApplications) {
   updatePlayAvailability();
   if (ui) {
     ui.renderApplications(applications, appSelect.value);
+    ui.setRunningApplication(runningAppId);
+  }
+  if (artworkLoader) {
+    artworkLoader.setApplications(applications);
+  }
+}
+
+function setRunningApplication(appId) {
+  runningAppId = typeof appId === "string" && appId ? appId : null;
+  applications.forEach(function (application) {
+    application.running = String(application.id) === String(runningAppId || "");
+  });
+  if (ui) {
+    ui.setRunningApplication(runningAppId);
   }
 }
 
@@ -556,9 +591,11 @@ function handleSessionStatus(message) {
   } else if (message.state === "idle") {
     closePeerConnection();
     currentSessionId = 0;
+    setRunningApplication(null);
     showHome();
     setHomeMessage("Session stopped. Choose settings to start again.", false);
     showNotification("Streaming stopped", "Choose an application to start again.", false);
+    requestApplications();
   } else if (message.state === "error") {
     setHomeMessage(message.message || "Session failed", true);
     if (currentSessionId) {
@@ -593,6 +630,7 @@ function startSelectedSession() {
     return;
   }
   selectedSession = selectedSettings();
+  setRunningApplication(appSelect.value);
   sessionTeardownInProgress = false;
   sessionState = "starting";
   updatePlayAvailability();
@@ -1745,6 +1783,21 @@ window.addEventListener("unhandledrejection", function (event) {
 
 ui = TizenUi.create({
   onApplicationSelected: launchApplication,
+});
+artworkLoader = ApplicationArtworkLoader.create({
+  requestArtwork: function (appId) {
+    try {
+      sendGatewayMessage({ type: "get-app-artwork", appId: appId });
+    } catch (error) {
+      log("Unable to request Sunshine artwork: " + errorMessage(error));
+      artworkLoader.handleResponse({ appId: appId, available: false });
+    }
+  },
+  onArtwork: function (appId, artworkDataUrl) {
+    if (ui) {
+      ui.updateApplicationArtwork(appId, artworkDataUrl);
+    }
+  },
 });
 ui.setGateway({
   name: "Moonlight Gateway",

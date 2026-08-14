@@ -19,7 +19,9 @@ struct SunshineServerInfo {
 
 struct SunshineApp {
     std::string title;
-    int id = 0;
+    // Sunshine application IDs are opaque GameStream identifiers. Keep their XML text
+    // unchanged for appasset lookups and Gateway protocol messages.
+    std::string id;
 };
 
 struct PairedSunshineHost {

@@ -26,6 +26,9 @@ private:
 };
 
 struct GetAppsRequest {};
+struct GetAppArtworkRequest {
+    std::string appId;
+};
 struct StopSessionRequest {};
 
 struct StartSessionRequest {
@@ -45,6 +48,7 @@ struct CandidateMessage {
 };
 
 using ClientPayload = std::variant<GetAppsRequest,
+                                   GetAppArtworkRequest,
                                    StartSessionRequest,
                                    StopSessionRequest,
                                    AnswerMessage,
@@ -60,17 +64,24 @@ struct GatewayStatus {
     bool sunshineDetected = false;
     bool sunshinePaired = false;
     bool sessionActive = false;
+    std::optional<std::string> runningAppId;
 };
 
 struct Application {
     std::string id;
     std::string title;
+    bool artworkAvailable = false;
+    bool running = false;
 };
 
 ClientMessage parseClientMessage(std::string_view text);
 nlohmann::json makeGatewayStatus(const GatewayStatus& status);
 nlohmann::json makeCapabilities();
 nlohmann::json makeApps(const std::vector<Application>& applications);
+nlohmann::json makeAppArtwork(std::string_view appId,
+                              bool available,
+                              std::string_view mimeType = {},
+                              std::string_view base64Data = {});
 nlohmann::json makeSessionStatus(std::string_view state,
                                  std::optional<std::uint64_t> sessionId = std::nullopt,
                                  std::optional<StreamSettings> settings = std::nullopt,

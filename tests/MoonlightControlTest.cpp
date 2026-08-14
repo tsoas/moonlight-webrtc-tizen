@@ -67,15 +67,41 @@ int main()
                 "/serverinfo XML parsing failed");
 
         const std::string appListXml =
-            R"(<?xml version="1.0"?><root status_code="200"><App><AppTitle>Steam</AppTitle><ID>1</ID></App><App><AppTitle>Desktop</AppTitle><ID>7</ID></App></root>)";
+            R"(<?xml version="1.0"?><root status_code="200"><App><AppTitle>Steam</AppTitle><ID>1</ID></App><App><AppTitle>Desktop</AppTitle><ID>7</ID></App><App><AppTitle>Large ID</AppTitle><ID>4294967295</ID></App></root>)";
         auto applications =
             gateway::moonlight::SunshineHttpClient::parseAppListXml(appListXml);
-        require(applications.size() == 2 && applications[1].title == "Desktop"
-                    && applications[1].id == 7,
+        require(applications.size() == 3 && applications[1].title == "Desktop"
+                    && applications[1].id == "7"
+                    && applications[2].id == "4294967295",
                 "/applist XML parsing failed");
         const auto* desktop = gateway::moonlight::SunshineHttpClient::findApplication(
             applications, "desktop");
-        require(desktop && desktop->id == 7, "Case-insensitive Desktop lookup failed");
+        require(desktop && desktop->id == "7", "Case-insensitive Desktop lookup failed");
+        const auto artworkQuery =
+            gateway::moonlight::SunshineHttpClient::makeAppArtworkQuery(applications[2].id);
+        require(artworkQuery.size() == 3 && artworkQuery[0] == std::pair{"appid", "4294967295"}
+                    && artworkQuery[1] == std::pair{"AssetType", "2"}
+                    && artworkQuery[2] == std::pair{"AssetIdx", "0"}
+                    && gateway::moonlight::SunshineHttpClient::appArtworkRequestTarget(
+                           applications[2].id)
+                           == "/appasset?appid=4294967295&AssetType=2&AssetIdx=0",
+                "Artwork request did not preserve the Sunshine app ID exactly");
+        require(gateway::moonlight::SunshineHttpClient::isSupportedArtworkMimeType(
+                    "image/jpeg; charset=binary")
+                    && gateway::moonlight::SunshineHttpClient::isSupportedArtworkMimeType(
+                        "image/png")
+                    && gateway::moonlight::SunshineHttpClient::isSupportedArtworkMimeType(
+                        "image/webp")
+                    && !gateway::moonlight::SunshineHttpClient::isSupportedArtworkMimeType(
+                        "image/svg+xml"),
+                "Sunshine artwork MIME validation is incorrect");
+        require(gateway::moonlight::SunshineHttpClient::isLikelyArtworkImage(
+                    "image/jpeg", {0xFF, 0xD8, 0xFF})
+                    && gateway::moonlight::SunshineHttpClient::isLikelyArtworkImage(
+                        "image/png", {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
+                    && !gateway::moonlight::SunshineHttpClient::isLikelyArtworkImage(
+                        "image/png", {0x00, 0x01}),
+                "Sunshine artwork signature validation is incorrect");
 
         const auto settings720 = gateway::defaultStreamSettings();
         const auto settings1080 = gateway::defaultStreamSettings(1920, 1080);
