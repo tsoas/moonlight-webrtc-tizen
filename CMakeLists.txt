@@ -159,7 +159,9 @@ target_link_libraries(moonlight_webrtc PRIVATE
 )
 
 add_executable(moonlight_webrtc_tray WIN32
+    src/tray/ConfigurationWindow.cpp
     src/tray/ServiceIpcClient.cpp
+    src/tray/StatusMonitor.cpp
     src/tray/TrayMain.cpp
 )
 
@@ -167,6 +169,8 @@ target_compile_features(moonlight_webrtc_tray PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc_tray PRIVATE
     service_ipc_protocol
     nlohmann_json::nlohmann_json
+    dwmapi
+    ole32
     shell32
 )
 

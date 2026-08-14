@@ -1,21 +1,24 @@
 #include "tray/ServiceIpcClient.h"
+#include "tray/ConfigurationWindow.h"
+#include "tray/StatusMonitor.h"
 
 #include <windows.h>
 #include <shellapi.h>
 
 #include <optional>
 #include <string>
+#include <memory>
 
 namespace {
 
 constexpr UINT TrayIconId = 1;
-constexpr UINT RefreshTimerId = 1;
 constexpr UINT ExitCommandId = 100;
+constexpr UINT OpenCommandId = 101;
 constexpr UINT TrayCallbackMessage = WM_APP + 1;
 
 struct TrayState {
-    std::optional<gateway::serviceipc::StatusSnapshot> status;
-    bool gatewayAvailable = false;
+    std::unique_ptr<gateway::tray::StatusMonitor> monitor;
+    gateway::tray::ConfigurationWindow configurationWindow;
 };
 
 std::wstring widen(const std::string& value)
@@ -29,48 +32,47 @@ std::wstring widen(const std::string& value)
     return result;
 }
 
-void refreshStatus(HWND window, TrayState& state)
+gateway::tray::StatusState currentStatus(const TrayState& state)
 {
-    try {
-        state.status = gateway::tray::requestServiceStatus();
-        state.gatewayAvailable = state.status->serviceRunning;
-    } catch (...) {
-        state.status.reset();
-        state.gatewayAvailable = false;
-    }
+    return state.monitor ? state.monitor->snapshot() : gateway::tray::StatusState{};
+}
 
+void refreshStatus(HWND window, const TrayState& state)
+{
+    const auto status = currentStatus(state);
     NOTIFYICONDATAW icon{};
     icon.cbSize = sizeof(icon);
     icon.hWnd = window;
     icon.uID = TrayIconId;
     icon.uFlags = NIF_TIP;
-    const std::wstring tooltip = state.gatewayAvailable
+    const std::wstring tooltip = status.gatewayAvailable
         ? L"Moonlight WebRTC Gateway: Running"
         : L"Moonlight WebRTC Gateway: Unavailable";
     wcsncpy_s(icon.szTip, tooltip.c_str(), _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &icon);
 }
 
-void showMenu(HWND window, const TrayState& state)
+void showMenu(HWND window, TrayState& state)
 {
+    const auto status = currentStatus(state);
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, L"Moonlight WebRTC");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu,
                 MF_STRING | MF_DISABLED,
                 0,
-                state.gatewayAvailable ? L"Gateway: Running" : L"Gateway: Unavailable");
+                status.gatewayAvailable ? L"Gateway: Running" : L"Gateway: Unavailable");
 
     std::wstring sunshine = L"Sunshine: Disconnected";
-    if (state.status && state.status->sunshineConnected && *state.status->sunshineConnected) {
+    if (status.status && status.status->sunshineConnected && *status.status->sunshineConnected) {
         sunshine = L"Sunshine: Connected";
-        if (state.status->sunshineHost) {
-            sunshine += L" (" + widen(*state.status->sunshineHost) + L")";
+        if (status.status->sunshineHost) {
+            sunshine += L" (" + widen(*status.status->sunshineHost) + L")";
         }
     }
     AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, sunshine.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, L"Open Moonlight WebRTC");
+    AppendMenuW(menu, MF_STRING, OpenCommandId, L"Open Moonlight WebRTC");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ExitCommandId, L"Exit");
 
@@ -83,8 +85,8 @@ void showMenu(HWND window, const TrayState& state)
     const UINT command = TrackPopupMenu(
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, nullptr);
     DestroyMenu(menu);
-    if (command == ExitCommandId) {
-        DestroyWindow(window);
+    if (command != 0) {
+        PostMessageW(window, WM_COMMAND, command, 0);
     }
 }
 
@@ -106,21 +108,38 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             wcsncpy_s(icon.szTip, L"Moonlight WebRTC Gateway", _TRUNCATE);
             Shell_NotifyIconW(NIM_ADD, &icon);
         }
+        state->monitor = std::make_unique<gateway::tray::StatusMonitor>(window);
+        state->monitor->start();
         refreshStatus(window, *state);
-        SetTimer(window, RefreshTimerId, 3000, nullptr);
         return 0;
-    case WM_TIMER:
-        if (wParam == RefreshTimerId && state) {
+    case gateway::tray::StatusChangedMessage:
+        if (state) {
             refreshStatus(window, *state);
+            state->configurationWindow.statusChanged();
+        }
+        return 0;
+    case WM_COMMAND:
+        if (!state) return 0;
+        if (LOWORD(wParam) == OpenCommandId) {
+            auto* monitor = state->monitor.get();
+            state->configurationWindow.show(
+                GetModuleHandleW(nullptr), [monitor] {
+                    return monitor ? monitor->snapshot() : gateway::tray::StatusState{};
+                });
+        } else if (LOWORD(wParam) == ExitCommandId) {
+            DestroyWindow(window);
         }
         return 0;
     case TrayCallbackMessage:
-        if ((lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) && state) {
+        if ((lParam == WM_RBUTTONUP || lParam == WM_LBUTTONDBLCLK) && state) {
             showMenu(window, *state);
         }
         return 0;
     case WM_DESTROY:
-        KillTimer(window, RefreshTimerId);
+        if (state) {
+            state->configurationWindow.close();
+            state->monitor->stop();
+        }
         {
             NOTIFYICONDATAW icon{};
             icon.cbSize = sizeof(icon);
