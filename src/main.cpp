@@ -3,6 +3,7 @@
 #include "gateway/ApplicationArtworkCache.h"
 #include "gateway/GatewayLifecycle.h"
 #include "gateway/GatewayProtocol.h"
+#include "gateway/ServiceIpcServer.h"
 #include "gateway/WindowsServiceHost.h"
 #include "media/MediaSender.h"
 #include "moonlight/MoonlightMediaBridge.h"
@@ -1095,6 +1096,48 @@ private:
         }
     }
 
+public:
+    gateway::serviceipc::StatusSnapshot localServiceStatus()
+    {
+        gateway::serviceipc::StatusSnapshot snapshot;
+        std::shared_ptr<Session> session;
+        {
+            const std::lock_guard lock(sessionMutex_);
+            session = activeSession_;
+        }
+        if (session) {
+            const std::lock_guard lock(session->streamMutex);
+            snapshot.sessionActive = session->sessionId != 0;
+            snapshot.connectedTvClients = session->socket && session->socket->isOpen() ? 1U : 0U;
+        } else {
+            snapshot.sessionActive = false;
+            snapshot.connectedTvClients = 0;
+        }
+
+        if (sourceMode_ == MediaSourceMode::Test) {
+            return snapshot;
+        }
+
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, moonlightOptions_.host, [](const std::string&) {});
+            snapshot.sunshineConnected = true;
+            snapshot.sunshinePaired = detected.pairedHost.has_value()
+                && detected.serverInfo.pairStatus == 1;
+            if (!detected.serverInfo.hostname.empty()) {
+                snapshot.sunshineHost = detected.serverInfo.hostname;
+            }
+            const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
+            if (runningAppId != 0) {
+                snapshot.runningApplicationId = std::to_string(runningAppId);
+            }
+        } catch (const std::exception&) {
+            snapshot.sunshineConnected = false;
+        }
+        return snapshot;
+    }
+
+private:
     void sendInitialState(const std::shared_ptr<Session>& session)
     {
         sendJson(session, gateway::protocol::makeGatewayStatus(gatewayStatus(session)));
@@ -1778,8 +1821,18 @@ int runGatewayRuntime(const ProgramOptions& options,
                       const gateway::WindowsServiceHost::ReadyCallback& ready)
 {
     SignalingServer server(options, std::ref(logger));
+    std::unique_ptr<gateway::serviceipc::ServiceIpcServer> serviceIpc;
+    if (options.hostMode == ProgramHostMode::Service) {
+        serviceIpc = std::make_unique<gateway::serviceipc::ServiceIpcServer>(
+            [&server] { return server.localServiceStatus(); });
+        serviceIpc->start();
+        logger("Local service IPC listening on \\\\.\\pipe\\MoonlightWebRTCGateway");
+    }
     ready();
     server.wait(shutdown);
+    if (serviceIpc) {
+        serviceIpc->stop();
+    }
     logger("Gateway runtime stopped");
     return 0;
 }

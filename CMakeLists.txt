@@ -57,6 +57,22 @@ add_library(gateway_lifecycle
 target_compile_features(gateway_lifecycle PUBLIC cxx_std_20)
 target_include_directories(gateway_lifecycle PUBLIC src)
 
+add_library(service_ipc_protocol
+    src/gateway/ServiceIpcProtocol.cpp
+)
+
+target_compile_features(service_ipc_protocol PUBLIC cxx_std_20)
+target_include_directories(service_ipc_protocol PUBLIC src)
+target_link_libraries(service_ipc_protocol PUBLIC nlohmann_json::nlohmann_json)
+
+add_library(service_ipc_server
+    src/gateway/ServiceIpcServer.cpp
+)
+
+target_compile_features(service_ipc_server PUBLIC cxx_std_20)
+target_include_directories(service_ipc_server PUBLIC src)
+target_link_libraries(service_ipc_server PUBLIC service_ipc_protocol advapi32)
+
 add_library(moonlight_video_profile
     src/moonlight/MoonlightVideoProfile.cpp
 )
@@ -130,6 +146,7 @@ target_link_libraries(moonlight_webrtc PRIVATE
     application_artwork_cache
     gateway_lifecycle
     gateway_protocol
+    service_ipc_server
     h264_annex_b_reader
     moonlight_control
     moonlight_input_bridge
@@ -139,6 +156,24 @@ target_link_libraries(moonlight_webrtc PRIVATE
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
     advapi32
+)
+
+add_executable(moonlight_webrtc_tray WIN32
+    src/tray/ServiceIpcClient.cpp
+    src/tray/TrayMain.cpp
+)
+
+target_compile_features(moonlight_webrtc_tray PRIVATE cxx_std_20)
+target_link_libraries(moonlight_webrtc_tray PRIVATE
+    service_ipc_protocol
+    nlohmann_json::nlohmann_json
+    shell32
+)
+
+set_target_properties(moonlight_webrtc_tray PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
 )
 
 set_target_properties(moonlight_webrtc PROPERTIES
@@ -240,5 +275,15 @@ if(BUILD_TESTING)
     add_test(
         NAME gateway_lifecycle_test
         COMMAND gateway_lifecycle_test
+    )
+
+    add_executable(service_ipc_protocol_test
+        tests/ServiceIpcProtocolTest.cpp
+    )
+    target_link_libraries(service_ipc_protocol_test PRIVATE service_ipc_protocol)
+
+    add_test(
+        NAME service_ipc_protocol_test
+        COMMAND service_ipc_protocol_test
     )
 endif()

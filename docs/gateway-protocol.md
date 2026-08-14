@@ -5,6 +5,26 @@ port 8000. Every message contains `"version": 1` and a `type`. The WebSocket tra
 configuration, lifecycle state, and WebRTC signaling only. Audio, video, and realtime
 gamepad snapshots remain on WebRTC.
 
+## Local Windows service IPC
+
+The Windows tray companion is a separate interactive-user process. It does not connect to
+the signaling WebSocket and cannot control streaming. It requests read-only Gateway status
+over the local named pipe `\\.\pipe\MoonlightWebRTCGateway`; the pipe rejects remote clients.
+
+Its protocol is independently versioned. Opening the read-only pipe requests one status
+snapshot; the service replies with a little-endian 32-bit JSON-byte length followed by the
+versioned JSON response. For example:
+
+```json
+{"version":1,"type":"status","serviceRunning":true,"sunshineConnected":true,"sunshinePaired":true,"sunshineHost":"Sunshine-PC","runningApplicationId":"7","sessionActive":false,"connectedTvClients":0}
+```
+
+Unavailable fields are omitted. The endpoint exposes no private key, certificate, pairing
+material, credential, token, or control command. Its protected ACL grants full access only
+to LocalService, SYSTEM, and Administrators. Local standard users receive only the standard
+named-pipe read mask: an open requests a snapshot, but no user-session process writes to the
+LocalService-owned endpoint. The DACL excludes remote callers.
+
 ## Gateway startup
 
 Opening the WebSocket does not start Sunshine or WebRTC. The Gateway first sends:
