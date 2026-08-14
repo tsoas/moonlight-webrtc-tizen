@@ -75,7 +75,14 @@
     const route = this.options.route();
     let state = this.states.get(gamepad.index);
     if (!state) {
-      state = { route: route, direction: null, repeatAt: 0, aHeld: false, bHeld: false };
+      state = {
+        route: route,
+        direction: null,
+        repeatAt: 0,
+        aHeld: false,
+        bHeld: false,
+        menuHeld: false,
+      };
       this.states.set(gamepad.index, state);
     }
     if (state.route !== route) {
@@ -85,9 +92,11 @@
     }
     const aPressed = pressed(gamepad, 0);
     const bPressed = pressed(gamepad, 1);
+    const menuPressed = pressed(gamepad, 9);
     if (route === "gameplay") {
       state.aHeld = aPressed;
       state.bHeld = bPressed;
+      state.menuHeld = menuPressed;
       return;
     }
     const direction = directionFor(gamepad);
@@ -104,8 +113,12 @@
     }
     if (aPressed && !state.aHeld) { this.options.activate(); }
     if (bPressed && !state.bHeld) { this.options.back(); }
+    if (menuPressed && !state.menuHeld && typeof this.options.menu === "function") {
+      this.options.menu();
+    }
     state.aHeld = aPressed;
     state.bHeld = bPressed;
+    state.menuHeld = menuPressed;
   };
 
   global.GamepadUiNavigation = {

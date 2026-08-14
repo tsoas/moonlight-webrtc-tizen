@@ -64,6 +64,7 @@ public:
                                int appId,
                                const STREAM_CONFIGURATION& streamConfiguration,
                                bool enableGameOptimizations);
+    void cancelRunningApplication();
 
     static Query makeLaunchQuery(int appId,
                                  const STREAM_CONFIGURATION& streamConfiguration,
@@ -72,6 +73,7 @@ public:
     static SunshineServerInfo parseServerInfoXml(const std::string& xml);
     static std::vector<SunshineApp> parseAppListXml(const std::string& xml);
     static Query makeAppArtworkQuery(const std::string& appId);
+    static int runningApplicationId(const SunshineServerInfo& serverInfo);
     static std::string appArtworkRequestTarget(const std::string& appId);
     static const SunshineApp* findApplication(std::vector<SunshineApp>& applications,
                                                const std::string& name);

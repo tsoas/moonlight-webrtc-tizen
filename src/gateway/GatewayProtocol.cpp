@@ -139,6 +139,9 @@ ClientMessage parseClientMessage(std::string_view text)
         if (type == "stop-session") {
             return {type, StopSessionRequest{}};
         }
+        if (type == "stop-host-session") {
+            return {type, StopHostSessionRequest{}};
+        }
         if (type == "start-session") {
             if (!message.at("appId").is_string()) {
                 throw ProtocolError("invalid-message", "appId must be a string");
@@ -148,6 +151,16 @@ ClientMessage parseClientMessage(std::string_view text)
                 throw ProtocolError("invalid-message", "appId must not be empty");
             }
             return {type, StartSessionRequest{appId, parseSettings(message)}};
+        }
+        if (type == "switch-session") {
+            if (!message.at("appId").is_string()) {
+                throw ProtocolError("invalid-message", "appId must be a string");
+            }
+            const auto appId = message.at("appId").get<std::string>();
+            if (appId.empty()) {
+                throw ProtocolError("invalid-message", "appId must not be empty");
+            }
+            return {type, SwitchSessionRequest{appId, parseSettings(message)}};
         }
         if (type == "answer") {
             return {type,
@@ -248,6 +261,25 @@ Json makeSessionStatus(std::string_view state,
     }
     if (settings) {
         message.update(settingsJson(*settings));
+    }
+    if (detail) {
+        message["message"] = *detail;
+    }
+    return message;
+}
+
+Json makeHostSessionStatus(std::string_view state,
+                           std::optional<std::string> runningAppId,
+                           std::optional<std::string> targetAppId,
+                           std::optional<std::string> detail)
+{
+    auto message = envelope("host-session-status");
+    message["state"] = state;
+    if (runningAppId) {
+        message["runningAppId"] = *runningAppId;
+    }
+    if (targetAppId) {
+        message["targetAppId"] = *targetAppId;
     }
     if (detail) {
         message["message"] = *detail;

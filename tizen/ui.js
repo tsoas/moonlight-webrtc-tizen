@@ -109,7 +109,7 @@
     this.settingsButton.addEventListener("click", function () { ui.showSettings(); });
     this.topBackButton.addEventListener("click", function () { ui.goBack(); });
     this.categoryButtons.forEach(function (button) {
-      button.addEventListener("click", function () { ui.selectSettingsCategory(button.dataset.category); });
+      button.addEventListener("click", function () { ui.enterSettingsCategory(button.dataset.category); });
     });
   };
 
@@ -273,6 +273,13 @@
 
   TizenUi.prototype.goBack = function () {
     if (this.currentView === "settings") {
+      if (this.settingsPanelElements().indexOf(document.activeElement) >= 0) {
+        const category = document.querySelector('[data-category="' + this.selectedCategory + '"]');
+        if (category && isFocusable(category)) {
+          category.focus();
+          return true;
+        }
+      }
       this.showView(this.previousView || "gateway");
       return true;
     }
@@ -291,6 +298,16 @@
     this.panels.forEach(function (panel) {
       panel.hidden = panel.dataset.settingsPanel !== category;
     });
+  };
+
+  TizenUi.prototype.enterSettingsCategory = function (category) {
+    this.selectSettingsCategory(category);
+    const panelElements = this.settingsPanelElements();
+    if (panelElements[0]) {
+      panelElements[0].focus();
+      return true;
+    }
+    return false;
   };
 
   TizenUi.prototype.focusDefault = function (view) {
@@ -353,14 +370,6 @@
         return true;
       }
       return false;
-    }
-    if (direction === "right") {
-      this.selectSettingsCategory(active.dataset.category);
-      const panelElements = this.settingsPanelElements();
-      if (panelElements[0]) {
-        panelElements[0].focus();
-        return true;
-      }
     }
     return false;
   };

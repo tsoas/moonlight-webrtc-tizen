@@ -73,8 +73,7 @@ std::string base64Encode(const std::vector<std::uint8_t>& bytes)
 
 int runningSunshineApplicationId(const gateway::moonlight::SunshineServerInfo& serverInfo)
 {
-    // currentgame is meaningful only while Sunshine reports an active stream.
-    return serverInfo.state.ends_with("_SERVER_BUSY") ? serverInfo.currentGame : 0;
+    return gateway::moonlight::SunshineHttpClient::runningApplicationId(serverInfo);
 }
 
 void requestShutdown(int)
@@ -205,6 +204,7 @@ struct Session {
     bool videoTrackOpen = false;
     bool audioTrackOpen = false;
     bool stopRequested = false;
+    bool hostOperationActive = false;
     std::atomic<bool> videoKeyframeRequested = false;
     std::atomic<std::uint64_t> keyframeRequestCount = 0;
     std::atomic<bool> malformedGamepadMessageReported = false;
@@ -1082,6 +1082,22 @@ private:
         log("Session status: " + std::string(state));
     }
 
+    void sendHostSessionStatus(const std::shared_ptr<Session>& session,
+                               std::string_view state,
+                               std::optional<std::string> runningAppId = std::nullopt,
+                               std::optional<std::string> targetAppId = std::nullopt,
+                               std::string_view detail = {})
+    {
+        sendJson(session,
+                 gateway::protocol::makeHostSessionStatus(
+                     state,
+                     std::move(runningAppId),
+                     std::move(targetAppId),
+                     detail.empty()
+                         ? std::nullopt
+                         : std::optional<std::string>(detail)));
+    }
+
     void startSession(
         const std::shared_ptr<Session>& session,
         const gateway::protocol::StartSessionRequest& request)
@@ -1097,6 +1113,14 @@ private:
         }
         {
             const std::lock_guard lock(session->streamMutex);
+            if (session->hostOperationActive) {
+                sendJson(session,
+                         gateway::protocol::makeError(
+                             "start-session",
+                             "host-operation-active",
+                             "Wait for the current Sunshine operation to complete"));
+                return;
+            }
             if (session->sessionId != 0 || session->peerConnection) {
                 sendJson(session,
                          gateway::protocol::makeError(
@@ -1242,6 +1266,152 @@ private:
         }
     }
 
+    bool beginHostOperation(const std::shared_ptr<Session>& session,
+                            std::string_view requestType)
+    {
+        const std::lock_guard lock(session->streamMutex);
+        if (session->hostOperationActive) {
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         requestType,
+                         "host-operation-active",
+                         "A Sunshine session operation is already in progress"));
+            return false;
+        }
+        session->hostOperationActive = true;
+        return true;
+    }
+
+    void finishHostOperation(const std::shared_ptr<Session>& session)
+    {
+        const std::lock_guard lock(session->streamMutex);
+        session->hostOperationActive = false;
+    }
+
+    bool waitForSunshineIdle(gateway::moonlight::SunshineHttpClient& client)
+    {
+        constexpr auto PollInterval = std::chrono::milliseconds(500);
+        constexpr int PollAttempts = 20;
+        for (int attempt = 0; attempt < PollAttempts; ++attempt) {
+            const auto serverInfo = client.getServerInfo(true, std::chrono::seconds(5));
+            if (runningSunshineApplicationId(serverInfo) == 0) {
+                return true;
+            }
+            if (attempt + 1 < PollAttempts) {
+                std::this_thread::sleep_for(PollInterval);
+            }
+        }
+        return false;
+    }
+
+    void reconcileApplications(const std::shared_ptr<Session>& session)
+    {
+        sendApplications(session);
+        sendJson(session, gateway::protocol::makeGatewayStatus(gatewayStatus(session)));
+    }
+
+    void stopOrSwitchHostSession(
+        const std::shared_ptr<Session>& session,
+        std::optional<gateway::protocol::StartSessionRequest> switchTarget)
+    {
+        const std::string requestType = switchTarget ? "switch-session" : "stop-host-session";
+        if (sourceMode_ != MediaSourceMode::Moonlight) {
+            sendJson(session,
+                     gateway::protocol::makeError(
+                         requestType,
+                         "unsupported-test-source",
+                         "Host session management requires the Moonlight source"));
+            return;
+        }
+        if (!beginHostOperation(session, requestType)) {
+            return;
+        }
+
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, moonlightOptions_.host, [this](const std::string& message) {
+                    log(message);
+                });
+            if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
+                throw std::runtime_error("Moonlight WebRTC Gateway is not paired with Sunshine");
+            }
+
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            client.setHttpsPort(detected.serverInfo.httpsPort);
+            client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
+
+            const auto currentInfo = client.getServerInfo(true, std::chrono::seconds(5));
+            const int runningAppId = runningSunshineApplicationId(currentInfo);
+            const auto runningId = runningAppId == 0
+                ? std::optional<std::string>{}
+                : std::optional<std::string>(std::to_string(runningAppId));
+
+            if (switchTarget) {
+                const auto applications = client.getAppList();
+                const auto target = std::ranges::find_if(
+                    applications, [&switchTarget](const auto& application) {
+                        return application.id == switchTarget->appId;
+                    });
+                if (target == applications.end()) {
+                    throw std::runtime_error("Selected Sunshine application no longer exists");
+                }
+                if (runningId && *runningId == switchTarget->appId) {
+                    sendHostSessionStatus(session,
+                                          "resuming",
+                                          runningId,
+                                          switchTarget->appId);
+                    finishHostOperation(session);
+                    startSession(session, *switchTarget);
+                    return;
+                }
+            }
+
+            if (!runningId) {
+                if (switchTarget) {
+                    sendHostSessionStatus(session, "starting", std::nullopt, switchTarget->appId);
+                    finishHostOperation(session);
+                    startSession(session, *switchTarget);
+                } else {
+                    reconcileApplications(session);
+                    sendHostSessionStatus(session, "stopped");
+                    finishHostOperation(session);
+                }
+                return;
+            }
+
+            sendHostSessionStatus(session,
+                                  switchTarget ? "switching" : "stopping",
+                                  runningId,
+                                  switchTarget
+                                      ? std::optional<std::string>(switchTarget->appId)
+                                      : std::nullopt);
+
+            // A local WebRTC disconnect remains distinct from /cancel. Here it is only
+            // performed because the explicit host-stop operation is about to cancel Sunshine.
+            stopActiveSession(session, false);
+            client.cancelRunningApplication();
+            if (!waitForSunshineIdle(client)) {
+                throw std::runtime_error(
+                    "Sunshine still reports a running application after cancellation");
+            }
+
+            reconcileApplications(session);
+            if (switchTarget) {
+                sendHostSessionStatus(session, "starting", std::nullopt, switchTarget->appId);
+                finishHostOperation(session);
+                startSession(session, *switchTarget);
+            } else {
+                sendHostSessionStatus(session, "stopped");
+                finishHostOperation(session);
+            }
+        } catch (const std::exception& error) {
+            log("Sunshine host session operation failed: " + std::string(error.what()));
+            reconcileApplications(session);
+            sendHostSessionStatus(session, "failed", std::nullopt, std::nullopt, error.what());
+            finishHostOperation(session);
+        }
+    }
+
     void handleMessage(const std::shared_ptr<Session>& session, const std::string& text)
     {
         try {
@@ -1260,6 +1430,16 @@ private:
             } else if (std::holds_alternative<gateway::protocol::StopSessionRequest>(
                            message.payload)) {
                 stopActiveSession(session, true);
+            } else if (std::holds_alternative<gateway::protocol::StopHostSessionRequest>(
+                           message.payload)) {
+                stopOrSwitchHostSession(session, std::nullopt);
+            } else if (const auto* switchRequest =
+                           std::get_if<gateway::protocol::SwitchSessionRequest>(
+                               &message.payload)) {
+                stopOrSwitchHostSession(
+                    session,
+                    gateway::protocol::StartSessionRequest{
+                        switchRequest->appId, switchRequest->settings});
             } else if (const auto* answer =
                            std::get_if<gateway::protocol::AnswerMessage>(
                                &message.payload)) {

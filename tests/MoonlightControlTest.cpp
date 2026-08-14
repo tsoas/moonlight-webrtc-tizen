@@ -65,6 +65,14 @@ int main()
                     && serverInfo.pairStatus == 1 && serverInfo.currentGame == 0
                     && serverInfo.serverCodecModeSupport == 2032385,
                 "/serverinfo XML parsing failed");
+        auto busyServerInfo = serverInfo;
+        busyServerInfo.currentGame = 7;
+        busyServerInfo.state = "SUNSHINE_SERVER_BUSY";
+        require(gateway::moonlight::SunshineHttpClient::runningApplicationId(busyServerInfo) == 7,
+                "Busy Sunshine serverinfo did not expose current application ID");
+        busyServerInfo.state = "SUNSHINE_SERVER_FREE";
+        require(gateway::moonlight::SunshineHttpClient::runningApplicationId(busyServerInfo) == 0,
+                "Stale currentgame was treated as a running application");
 
         const std::string appListXml =
             R"(<?xml version="1.0"?><root status_code="200"><App><AppTitle>Steam</AppTitle><ID>1</ID></App><App><AppTitle>Desktop</AppTitle><ID>7</ID></App><App><AppTitle>Large ID</AppTitle><ID>4294967295</ID></App></root>)";

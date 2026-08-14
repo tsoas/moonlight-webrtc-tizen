@@ -249,12 +249,42 @@ int main()
             R"({"version":1,"type":"stop-session"})");
         require(std::holds_alternative<gateway::protocol::StopSessionRequest>(stop.payload),
                 "stop-session parsing failed");
+        const auto stopHost = gateway::protocol::parseClientMessage(
+            R"({"version":1,"type":"stop-host-session"})");
+        require(std::holds_alternative<gateway::protocol::StopHostSessionRequest>(stopHost.payload),
+                "stop-host-session parsing failed");
+        const auto switchSession = gateway::protocol::parseClientMessage(
+            nlohmann::json({
+                {"version", 1},
+                {"type", "switch-session"},
+                {"appId", "7"},
+                {"video",
+                 {{"width", 1920},
+                  {"height", 1080},
+                  {"fps", 60},
+                  {"codec", "hevc"},
+                  {"bitrateKbps", 20000},
+                  {"hdr", false}}},
+                {"audio", {{"channels", 2}}},
+            }).dump());
+        const auto& switchRequest =
+            std::get<gateway::protocol::SwitchSessionRequest>(switchSession.payload);
+        require(switchRequest.appId == "7" && switchRequest.settings == settingsHevc1080,
+                "switch-session parsing failed");
         requireProtocolError(
             [] {
                 gateway::protocol::parseClientMessage(
                     R"({"version":2,"type":"stop-session"})");
             },
             "unsupported-version");
+
+        const auto hostStopping = gateway::protocol::makeHostSessionStatus(
+            "stopping", "7", std::nullopt, "Stopping Desktop");
+        require(hostStopping.at("type") == "host-session-status"
+                    && hostStopping.at("state") == "stopping"
+                    && hostStopping.at("runningAppId") == "7"
+                    && hostStopping.at("message") == "Stopping Desktop",
+                "host session status generation failed");
 
         const auto imageAttribute720 = gateway::samsungGameModeImageAttribute(settings720);
         const auto imageAttribute1080 = gateway::samsungGameModeImageAttribute(settings1080);

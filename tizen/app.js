@@ -24,6 +24,14 @@ const bitrateSelect = document.getElementById("bitrate-select");
 const settingsSelectorMenu = document.getElementById("settings-selector-menu");
 const settingsSelectorHeading = document.getElementById("settings-selector-heading");
 const settingsSelectorOptions = document.getElementById("settings-selector-options");
+const runningAppMenu = document.getElementById("running-app-menu");
+const runningAppMenuHeading = document.getElementById("running-app-menu-heading");
+const resumeSessionButton = document.getElementById("resume-session-button");
+const stopHostSessionButton = document.getElementById("stop-host-session-button");
+const switchAppDialog = document.getElementById("switch-app-dialog");
+const switchAppMessage = document.getElementById("switch-app-message");
+const switchCancelButton = document.getElementById("switch-cancel-button");
+const switchConfirmButton = document.getElementById("switch-confirm-button");
 const playButton = document.getElementById("play-button");
 const continueButton = document.getElementById("continue-button");
 const diagnosticsButton = document.getElementById("diagnostics-button");
@@ -140,6 +148,9 @@ let applications = [];
 let ui = null;
 let artworkLoader = null;
 let runningAppId = null;
+let hostOperationBusy = false;
+let runningAppMenuOriginId = null;
+let switchTargetApplicationId = null;
 let currentGatewayName = "Moonlight Gateway";
 let savedPreferences = preferences.load();
 
@@ -220,7 +231,7 @@ function reportDataChannelError(context, error) {
 
 function updatePlayAvailability() {
   playButton.disabled = !gatewayConnected || !sunshineReady || !appsLoaded
-    || sessionState !== "idle";
+    || sessionState !== "idle" || hostOperationBusy;
   updateGatewayCard();
 }
 
@@ -316,6 +327,8 @@ async function handleGatewayMessage(text) {
     }
   } else if (message.type === "session-status") {
     handleSessionStatus(message);
+  } else if (message.type === "host-session-status") {
+    handleHostSessionStatus(message);
   } else if (message.type === "offer") {
     await handleOffer(message);
   } else if (message.type === "candidate") {
@@ -584,6 +597,7 @@ function handleSessionStatus(message) {
 
   overlay.connection.textContent = readableState(message.state);
   if (message.state === "streaming") {
+    hostOperationBusy = false;
     sessionTeardownInProgress = false;
     showStreaming();
     resumeGamepadInput();
@@ -591,12 +605,12 @@ function handleSessionStatus(message) {
   } else if (message.state === "idle") {
     closePeerConnection();
     currentSessionId = 0;
-    setRunningApplication(null);
     showHome();
-    setHomeMessage("Session stopped. Choose settings to start again.", false);
-    showNotification("Streaming stopped", "Choose an application to start again.", false);
+    setHomeMessage("Stream disconnected. Running applications remain available.", false);
+    showNotification("Streaming disconnected", "Choose an application to resume or launch.", false);
     requestApplications();
   } else if (message.state === "error") {
+    hostOperationBusy = false;
     setHomeMessage(message.message || "Session failed", true);
     if (currentSessionId) {
       try {
@@ -606,10 +620,41 @@ function handleSessionStatus(message) {
       }
     }
   } else {
+    if (message.state === "starting" || message.state === "starting-webrtc") {
+      hostOperationBusy = false;
+    }
     setHomeMessage("Session: " + readableState(message.state), false);
   }
   updatePlayAvailability();
   log("Session status: " + message.state);
+}
+
+function handleHostSessionStatus(message) {
+  const state = String(message.state || "unknown");
+  if (state === "stopping") {
+    hostOperationBusy = true;
+    setHomeMessage("Stopping running application...", false);
+  } else if (state === "switching") {
+    hostOperationBusy = true;
+    setHomeMessage("Stopping running application before launch...", false);
+  } else if (state === "resuming" || state === "starting") {
+    hostOperationBusy = true;
+    setHomeMessage(state === "resuming" ? "Resuming application..." : "Starting application...", false);
+  } else if (state === "stopped") {
+    hostOperationBusy = false;
+    setRunningApplication(null);
+    setHomeMessage("Running application stopped.", false);
+    showNotification("Session stopped", "Sunshine application closed.", false);
+    requestApplications();
+  } else if (state === "failed") {
+    hostOperationBusy = false;
+    const detail = message.message || "Sunshine did not complete the requested operation";
+    setHomeMessage(detail, true);
+    showNotification("Session operation failed", detail, true);
+    requestApplications();
+  }
+  updatePlayAvailability();
+  log("Host session status: " + state);
 }
 
 function selectedSettings() {
@@ -630,7 +675,6 @@ function startSelectedSession() {
     return;
   }
   selectedSession = selectedSettings();
-  setRunningApplication(appSelect.value);
   sessionTeardownInProgress = false;
   sessionState = "starting";
   updatePlayAvailability();
@@ -961,6 +1005,147 @@ function focusFirstHomeControl() {
   }
 }
 
+function applicationById(applicationId) {
+  return applications.find(function (application) {
+    return String(application.id) === String(applicationId);
+  }) || null;
+}
+
+function applicationSessionRequest(type, applicationId) {
+  const settings = selectedSettings();
+  return {
+    type: type,
+    appId: String(applicationId),
+    video: {
+      width: settings.width,
+      height: settings.height,
+      fps: settings.fps,
+      codec: settings.codec,
+      bitrateKbps: settings.bitrateKbps,
+      hdr: settings.hdr,
+    },
+    audio: { channels: 2 },
+  };
+}
+
+function runningAppMenuIsOpen() {
+  return !runningAppMenu.hidden;
+}
+
+function switchAppDialogIsOpen() {
+  return !switchAppDialog.hidden;
+}
+
+function closeRunningAppMenu() {
+  if (!runningAppMenuIsOpen()) {
+    return false;
+  }
+  runningAppMenu.hidden = true;
+  const origin = runningAppMenuOriginId;
+  runningAppMenuOriginId = null;
+  if (ui && origin) {
+    const card = ui.applicationCard(origin);
+    if (card) {
+      card.focus();
+    }
+  }
+  return true;
+}
+
+function openRunningAppMenu() {
+  if (hostOperationBusy || !ui || ui.currentView !== "applications") {
+    return false;
+  }
+  const active = document.activeElement;
+  const applicationId = active && active.dataset ? active.dataset.applicationId : null;
+  if (!applicationId || String(applicationId) !== String(runningAppId || "")) {
+    return false;
+  }
+  const application = applicationById(applicationId);
+  if (!application) {
+    return false;
+  }
+  runningAppMenuOriginId = applicationId;
+  runningAppMenuHeading.textContent = application.title;
+  runningAppMenu.hidden = false;
+  resumeSessionButton.focus();
+  return true;
+}
+
+function closeSwitchAppDialog() {
+  if (!switchAppDialogIsOpen()) {
+    return false;
+  }
+  switchAppDialog.hidden = true;
+  const targetId = switchTargetApplicationId;
+  switchTargetApplicationId = null;
+  if (ui && targetId) {
+    const card = ui.applicationCard(targetId);
+    if (card) {
+      card.focus();
+    }
+  }
+  return true;
+}
+
+function openSwitchAppDialog(targetId) {
+  const running = applicationById(runningAppId);
+  const target = applicationById(targetId);
+  if (!running || !target || hostOperationBusy) {
+    return false;
+  }
+  switchTargetApplicationId = target.id;
+  switchAppMessage.textContent = "Stop " + running.title + " and launch " + target.title
+    + "? Any unsaved progress may be lost.";
+  switchAppDialog.hidden = false;
+  switchCancelButton.focus();
+  return true;
+}
+
+function resumeRunningApplication() {
+  const applicationId = runningAppMenuOriginId || runningAppId;
+  closeRunningAppMenu();
+  if (!applicationId || hostOperationBusy) {
+    return;
+  }
+  launchApplication(applicationId);
+}
+
+function stopRunningApplication() {
+  closeRunningAppMenu();
+  if (!runningAppId || hostOperationBusy) {
+    return;
+  }
+  try {
+    hostOperationBusy = true;
+    updatePlayAvailability();
+    setHomeMessage("Stopping running application...", false);
+    sendGatewayMessage({ type: "stop-host-session" });
+  } catch (error) {
+    hostOperationBusy = false;
+    reportError("Unable to stop Sunshine application", error);
+    updatePlayAvailability();
+  }
+}
+
+function confirmSwitchApplication() {
+  const targetId = switchTargetApplicationId;
+  closeSwitchAppDialog();
+  if (!targetId || hostOperationBusy) {
+    return;
+  }
+  try {
+    hostOperationBusy = true;
+    updatePlayAvailability();
+    setHomeMessage("Stopping running application before launch...", false);
+    sendGatewayMessage(applicationSessionRequest("switch-session", targetId));
+  } catch (error) {
+    hostOperationBusy = false;
+    reportError("Unable to switch Sunshine application", error);
+    updatePlayAvailability();
+  }
+}
+
 function launchApplication(applicationId) {
   const optionIndex = Array.prototype.findIndex.call(appSelect.options, function (option) {
     return option.value === String(applicationId);
@@ -970,6 +1155,17 @@ function launchApplication(applicationId) {
     return;
   }
   appSelect.selectedIndex = optionIndex;
+  if (hostOperationBusy) {
+    return;
+  }
+  if (runningAppId) {
+    if (String(runningAppId) === String(applicationId)) {
+      startSelectedSession();
+    } else {
+      openSwitchAppDialog(applicationId);
+    }
+    return;
+  }
   startSelectedSession();
 }
 
@@ -1073,6 +1269,20 @@ function isGameplayInputActive() {
 }
 
 function navigateUi(direction) {
+  if (runningAppMenuIsOpen()) {
+    if (direction === "up" || direction === "down") {
+      moveFocus(runningAppMenu, direction === "down" ? 1 : -1);
+      return true;
+    }
+    return false;
+  }
+  if (switchAppDialogIsOpen()) {
+    if (direction === "up" || direction === "down") {
+      moveFocus(switchAppDialog, direction === "down" ? 1 : -1);
+      return true;
+    }
+    return false;
+  }
   if (settingsSelectorIsOpen()) {
     if (direction === "up" || direction === "down") {
       moveFocus(settingsSelectorOptions, direction === "down" ? 1 : -1);
@@ -1092,6 +1302,28 @@ function navigateUi(direction) {
 
 function activateFocusedControl() {
   const active = document.activeElement;
+  if (runningAppMenuIsOpen()) {
+    if (active === resumeSessionButton) {
+      resumeRunningApplication();
+      return true;
+    }
+    if (active === stopHostSessionButton) {
+      stopRunningApplication();
+      return true;
+    }
+    return false;
+  }
+  if (switchAppDialogIsOpen()) {
+    if (active === switchCancelButton) {
+      closeSwitchAppDialog();
+      return true;
+    }
+    if (active === switchConfirmButton) {
+      confirmSwitchApplication();
+      return true;
+    }
+    return false;
+  }
   if (settingsSelectorIsOpen()) {
     if (active && active.classList.contains("settings-selector-option")) {
       active.click();
@@ -1110,6 +1342,9 @@ function activateFocusedControl() {
 }
 
 function goBackFromUiInput() {
+  if (closeRunningAppMenu() || closeSwitchAppDialog()) {
+    return true;
+  }
   if (closeSettingsSelector()) {
     return true;
   }
@@ -1137,6 +1372,10 @@ function goBackFromUiInput() {
   }
   exitApplication();
   return true;
+}
+
+function openFocusedApplicationMenu() {
+  return openRunningAppMenu();
 }
 
 document.addEventListener("keydown", function (event) {
@@ -1198,6 +1437,10 @@ playButton.addEventListener("click", startSelectedSession);
 continueButton.addEventListener("click", hideStreamMenu);
 diagnosticsButton.addEventListener("click", toggleDiagnostics);
 stopButton.addEventListener("click", stopCurrentSession);
+resumeSessionButton.addEventListener("click", resumeRunningApplication);
+stopHostSessionButton.addEventListener("click", stopRunningApplication);
+switchCancelButton.addEventListener("click", closeSwitchAppDialog);
+switchConfirmButton.addEventListener("click", confirmSwitchApplication);
 resolutionSelect.addEventListener("change", function () {
   applySelectedVideoMode();
   persistCurrentPreferences();
@@ -1563,6 +1806,7 @@ const gamepadUiNavigation = window.GamepadUiNavigation.create({
   navigate: navigateUi,
   activate: activateFocusedControl,
   back: goBackFromUiInput,
+  menu: openFocusedApplicationMenu,
 });
 
 function syncGamepadUi() {

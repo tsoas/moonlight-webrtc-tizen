@@ -30,6 +30,7 @@ const navigator = global.GamepadUiNavigation.create({
   navigate: function (direction) { actions.push("navigate:" + direction); },
   activate: function () { actions.push("activate"); },
   back: function () { actions.push("back"); },
+  menu: function () { actions.push("menu"); },
 });
 navigator.handleGamepad(gamepad(buttons([15])), 0);
 assert.deepStrictEqual(actions, ["navigate:right"], "UI route receives gamepad direction");
@@ -41,9 +42,13 @@ actions.length = 0;
 navigator.handleGamepad(gamepad([], []), 60);
 navigator.handleGamepad(gamepad(buttons([1])), 80);
 assert.deepStrictEqual(actions, ["back"], "B follows the shared Back action");
+actions.length = 0;
+navigator.handleGamepad(gamepad([], []), 90);
+navigator.handleGamepad(gamepad(buttons([9])), 100);
+assert.deepStrictEqual(actions, ["menu"], "Start/Menu opens the contextual UI action");
 route = "gameplay";
 actions.length = 0;
-navigator.handleGamepad(gamepad(buttons([1, 12])), 100);
+navigator.handleGamepad(gamepad(buttons([1, 9, 12])), 120);
 assert.deepStrictEqual(actions, [], "gamepad buttons are not consumed by UI during gameplay");
 
 console.log("Tizen gamepad UI navigation tests passed");

@@ -124,6 +124,40 @@ The Gateway neutralizes/removes the controller, stops Moonlight and media, close
 PeerConnection, keeps the WebSocket open, and returns to `idle`. A new `start-session`
 request can then create another PeerConnection without restarting the Gateway.
 
+This is a local client disconnect only. It does not call Sunshine `/cancel`, so a running
+Sunshine application remains available for a later `start-session`; the Gateway selects the
+Moonlight-compatible `/resume` request when `serverinfo` reports that the same app is active.
+
+## Stop or switch a running Sunshine application
+
+The TV asks the Gateway to stop the host-side application with:
+
+```json
+{"version":1,"type":"stop-host-session"}
+```
+
+The Gateway first closes any local stream through the normal cleanup path, then uses its paired,
+certificate-pinned GameStream HTTPS client to call Sunshine `/cancel`. It polls authenticated
+`serverinfo` until `currentgame` is no longer active before reporting `host-session-status` with
+`"state":"stopped"`.
+
+Switching is one ordered Gateway operation. The Gateway validates the target, cancels the current
+application, verifies Sunshine is idle, and only then starts the existing launch flow:
+
+```json
+{
+  "version":1,
+  "type":"switch-session",
+  "appId":"7",
+  "video":{"width":1920,"height":1080,"fps":60,"codec":"hevc","bitrateKbps":20000,"hdr":false},
+  "audio":{"channels":2}
+}
+```
+
+`host-session-status` carries the small UI transition state (`stopping`, `switching`, `starting`,
+`stopped`, or `failed`) and optional running/target app IDs. The TV never contacts Sunshine
+directly.
+
 ## Errors
 
 ```json

@@ -59,8 +59,14 @@ assert.ok(uiSource.includes("TizenUi.prototype.focusSettingsCategory"),
   "settings categories must use their own vertical focus graph");
 assert.ok(uiSource.includes("categories[index - 1].focus();"),
   "UP from Input must stay within the settings category list");
-assert.ok(uiSource.includes("this.selectSettingsCategory(active.dataset.category);"),
-  "RIGHT from a category must open that category's own settings panel");
+assert.ok(uiSource.includes("TizenUi.prototype.enterSettingsCategory"),
+  "OK on a category must explicitly enter that category's settings panel");
+assert.ok(uiSource.includes("ui.enterSettingsCategory(button.dataset.category)"),
+  "remote and gamepad activation must use the shared Settings entry action");
+assert.ok(!uiSource.includes('if (direction === "right") {\n      this.selectSettingsCategory(active.dataset.category);'),
+  "RIGHT must not enter Settings options");
+assert.ok(uiSource.includes("this.settingsPanelElements().indexOf(document.activeElement) >= 0"),
+  "Back from Settings options must return to the selected category");
 assert.ok(uiSource.includes("if (index === 0)"),
   "only the first settings category may enter the header with UP");
 assert.ok(appSource.includes("isStreaming: isGameplayInputActive"),
@@ -93,8 +99,24 @@ assert.ok(appSource.includes('type === "app-artwork"'),
   "Gateway artwork responses must update application cards asynchronously");
 assert.ok(appSource.includes("setRunningApplication(message.runningAppId)"),
   "Gateway running application state must reach the cards");
-assert.ok(appSource.includes("setRunningApplication(null);"),
-  "normal session cleanup must clear stale running state before refreshing Sunshine");
+assert.ok(appSource.includes("Stream disconnected. Running applications remain available."),
+  "local disconnect must preserve Sunshine running state until the app list refreshes");
+assert.ok(html.includes('id="running-app-menu"')
+  && html.includes("Resume session") && html.includes("Stop session"),
+  "running applications require a resume/stop context menu");
+assert.ok(html.includes('id="switch-app-dialog"') && html.includes("Stop &amp; Launch"),
+  "switching applications requires an explicit confirmation dialog");
+assert.ok(appSource.includes("function openRunningAppMenu()")
+  && appSource.includes("function resumeRunningApplication()")
+  && appSource.includes("function stopRunningApplication()"),
+  "running app operations must use shared UI actions");
+assert.ok(appSource.includes('type: "stop-host-session"')
+  && appSource.includes('applicationSessionRequest("switch-session", targetId)'),
+  "host stop and switch must use explicit Gateway protocol operations");
+assert.ok(appSource.includes("if (String(runningAppId) === String(applicationId))"),
+  "selecting the current Sunshine application must resume rather than relaunch");
+assert.ok(appSource.includes("hostOperationBusy"),
+  "host operations must prevent duplicate UI actions while Sunshine reconciles state");
 assert.ok(uiSource.includes("application-running"),
   "running applications require a non-focusable visual indicator");
 assert.ok(uiSource.indexOf('card.appendChild(art);') < uiSource.indexOf('card.appendChild(name);'),

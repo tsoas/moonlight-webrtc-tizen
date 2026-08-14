@@ -451,6 +451,17 @@ std::string SunshineHttpClient::launchOrResume(
     return sessionUrl;
 }
 
+void SunshineHttpClient::cancelRunningApplication()
+{
+    const std::string xml = requestHttps("cancel", {}, LaunchTimeout);
+    verifyResponseStatus(xml);
+}
+
+int SunshineHttpClient::runningApplicationId(const SunshineServerInfo& serverInfo)
+{
+    return serverInfo.state.ends_with("_SERVER_BUSY") ? serverInfo.currentGame : 0;
+}
+
 SunshineHttpClient::Query SunshineHttpClient::makeLaunchQuery(
     int appId,
     const STREAM_CONFIGURATION& streamConfiguration,

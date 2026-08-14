@@ -281,8 +281,9 @@ void MoonlightSession::start()
         }
 
         std::string verb = "launch";
-        if (detected.serverInfo.currentGame != 0) {
-            if (std::to_string(detected.serverInfo.currentGame) != application->id) {
+        const int runningAppId = SunshineHttpClient::runningApplicationId(detected.serverInfo);
+        if (runningAppId != 0) {
+            if (std::to_string(runningAppId) != application->id) {
                 throw std::runtime_error(
                     "Sunshine is already streaming a different application");
             }

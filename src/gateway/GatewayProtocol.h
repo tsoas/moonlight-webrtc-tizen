@@ -30,8 +30,14 @@ struct GetAppArtworkRequest {
     std::string appId;
 };
 struct StopSessionRequest {};
+struct StopHostSessionRequest {};
 
 struct StartSessionRequest {
+    std::string appId;
+    StreamSettings settings;
+};
+
+struct SwitchSessionRequest {
     std::string appId;
     StreamSettings settings;
 };
@@ -51,6 +57,8 @@ using ClientPayload = std::variant<GetAppsRequest,
                                    GetAppArtworkRequest,
                                    StartSessionRequest,
                                    StopSessionRequest,
+                                   StopHostSessionRequest,
+                                   SwitchSessionRequest,
                                    AnswerMessage,
                                    CandidateMessage>;
 
@@ -86,6 +94,10 @@ nlohmann::json makeSessionStatus(std::string_view state,
                                  std::optional<std::uint64_t> sessionId = std::nullopt,
                                  std::optional<StreamSettings> settings = std::nullopt,
                                  std::optional<std::string> message = std::nullopt);
+nlohmann::json makeHostSessionStatus(std::string_view state,
+                                     std::optional<std::string> runningAppId = std::nullopt,
+                                     std::optional<std::string> targetAppId = std::nullopt,
+                                     std::optional<std::string> message = std::nullopt);
 nlohmann::json makeError(std::string_view requestType,
                          std::string_view code,
                          std::string_view message);
