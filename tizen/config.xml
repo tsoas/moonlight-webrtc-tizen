@@ -2,7 +2,7 @@
 <widget xmlns="http://www.w3.org/ns/widgets"
         xmlns:tizen="http://tizen.org/ns/widgets"
         id="http://moonlight-webrtc.local/MoonlightWebRTCTest"
-        version="1.0.7"
+        version="1.0.0"
         viewmodes="maximized">
     <tizen:application id="MlWrtcTst1.MoonlightWebRTCTest"
                        package="MlWrtcTst1"
