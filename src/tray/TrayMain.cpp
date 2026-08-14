@@ -16,6 +16,7 @@ constexpr UINT TrayIconId = 1;
 constexpr UINT ExitCommandId = 100;
 constexpr UINT OpenCommandId = 101;
 constexpr UINT TrayCallbackMessage = WM_APP + 1;
+constexpr UINT TrayIconResourceId = 1;
 
 struct TrayState {
     std::unique_ptr<gateway::tray::StatusMonitor> monitor;
@@ -87,7 +88,19 @@ void showMenu(HWND window, TrayState& state)
     const UINT command = TrackPopupMenu(
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, nullptr);
     DestroyMenu(menu);
-    if (command != 0) {
+    // Let the shell complete the tray-menu dismissal before handling a command
+    // that may create and foreground the configuration window.
+    PostMessageW(window, WM_NULL, 0, 0);
+    if (command == OpenCommandId) {
+        auto* monitor = state.monitor.get();
+        state.configurationWindow.show(
+            GetModuleHandleW(nullptr), [monitor] {
+                return monitor ? monitor->snapshot() : gateway::tray::StatusState{};
+            }, [management = state.management.get()](const gateway::managementipc::Command& command) {
+                return management ? management->execute(command)
+                                  : gateway::managementipc::Result{false, "unavailable", "Management IPC is unavailable"};
+            });
+    } else if (command == ExitCommandId) {
         PostMessageW(window, WM_COMMAND, command, 0);
     }
 }
@@ -106,7 +119,15 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             icon.uID = TrayIconId;
             icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             icon.uCallbackMessage = TrayCallbackMessage;
-            icon.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+            const HICON smallIcon = static_cast<HICON>(LoadImageW(
+                GetModuleHandleW(nullptr), MAKEINTRESOURCEW(TrayIconResourceId), IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
+            const HICON largeIcon = static_cast<HICON>(LoadImageW(
+                GetModuleHandleW(nullptr), MAKEINTRESOURCEW(TrayIconResourceId), IMAGE_ICON,
+                GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR | LR_SHARED));
+            SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
+            SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
+            icon.hIcon = smallIcon;
             wcsncpy_s(icon.szTip, L"Moonlight WebRTC Gateway", _TRUNCATE);
             Shell_NotifyIconW(NIM_ADD, &icon);
         }
@@ -167,6 +188,10 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
+    // This must happen before the hidden tray window (and any configuration
+    // window) is created so each monitor supplies its actual DPI.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     constexpr wchar_t WindowClassName[] = L"MoonlightWebRTCTrayWindow";
     WNDCLASSW windowClass{};
     windowClass.hInstance = instance;

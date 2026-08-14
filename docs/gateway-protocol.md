@@ -16,7 +16,7 @@ snapshot; the service replies with a little-endian 32-bit JSON-byte length follo
 versioned JSON response. For example:
 
 ```json
-{"version":1,"type":"status","serviceRunning":true,"sunshineConnected":true,"sunshinePaired":true,"sunshineHost":"Sunshine-PC","runningApplicationId":"7","sessionActive":false,"connectedTvClients":0}
+{"version":1,"type":"status","serviceRunning":true,"sunshineConnected":true,"sunshinePaired":true,"sunshineHost":"Sunshine-PC","runningApplicationId":"7","runningApplicationName":"Desktop","sessionActive":false,"connectedTvClients":0}
 ```
 
 Unavailable fields are omitted. The endpoint exposes no private key, certificate, pairing

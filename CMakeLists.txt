@@ -181,6 +181,7 @@ add_executable(moonlight_webrtc_tray WIN32
     src/tray/ServiceIpcClient.cpp
     src/tray/StatusMonitor.cpp
     src/tray/TrayMain.cpp
+    src/tray/TrayResources.rc
 )
 
 target_compile_features(moonlight_webrtc_tray PRIVATE cxx_std_20)

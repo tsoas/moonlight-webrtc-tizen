@@ -45,6 +45,7 @@ int main()
         snapshot.sunshinePaired = true;
         snapshot.sunshineHost = "Sunshine-PC";
         snapshot.runningApplicationId = "7";
+        snapshot.runningApplicationName = "Desktop";
         snapshot.sessionActive = true;
         snapshot.connectedTvClients = 1;
         const auto response = nlohmann::json::parse(
@@ -55,6 +56,7 @@ int main()
                     && response.at("sunshinePaired") == true
                     && response.at("sunshineHost") == "Sunshine-PC"
                     && response.at("runningApplicationId") == "7"
+                    && response.at("runningApplicationName") == "Desktop"
                     && response.at("connectedTvClients") == 1,
                 "IPC status response did not preserve supported snapshot fields");
 

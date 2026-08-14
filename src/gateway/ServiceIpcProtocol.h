@@ -15,6 +15,7 @@ struct StatusSnapshot {
     std::optional<bool> sunshinePaired;
     std::optional<std::string> sunshineHost;
     std::optional<std::string> runningApplicationId;
+    std::optional<std::string> runningApplicationName;
     std::optional<bool> sessionActive;
     std::optional<std::uint32_t> connectedTvClients;
 };

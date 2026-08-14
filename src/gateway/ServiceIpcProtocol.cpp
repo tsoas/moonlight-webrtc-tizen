@@ -47,6 +47,9 @@ std::string makeStatusResponse(const StatusSnapshot& snapshot)
     if (snapshot.runningApplicationId) {
         response["runningApplicationId"] = *snapshot.runningApplicationId;
     }
+    if (snapshot.runningApplicationName) {
+        response["runningApplicationName"] = *snapshot.runningApplicationName;
+    }
     if (snapshot.sessionActive) {
         response["sessionActive"] = *snapshot.sessionActive;
     }

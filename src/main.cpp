@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -1017,14 +1018,21 @@ private:
             detected.pairedHost->serverCertificatePem);
 
         const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
+        const auto sunshineApplications = client.getAppList();
         std::vector<gateway::protocol::Application> result;
-        for (const auto& application : client.getAppList()) {
+        std::unordered_map<std::string, std::string> titles;
+        for (const auto& application : sunshineApplications) {
             const std::string& appId = application.id;
             const auto cached = artworkCache_.find(detected.serverInfo.uniqueId, appId);
             result.push_back({appId,
                               application.title,
                               cached && cached->available,
                               application.id == std::to_string(runningAppId)});
+            titles[detected.serverInfo.uniqueId + '\n' + appId] = application.title;
+        }
+        {
+            const std::lock_guard lock(applicationTitleMutex_);
+            applicationTitles_.insert(titles.begin(), titles.end());
         }
         return result;
     }
@@ -1207,6 +1215,13 @@ public:
             const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
             if (runningAppId != 0) {
                 snapshot.runningApplicationId = std::to_string(runningAppId);
+                const std::string cacheKey = detected.serverInfo.uniqueId + '\n' + *snapshot.runningApplicationId;
+                {
+                    const std::lock_guard lock(applicationTitleMutex_);
+                    if (const auto cached = applicationTitles_.find(cacheKey); cached != applicationTitles_.end()) {
+                        snapshot.runningApplicationName = cached->second;
+                    }
+                }
             }
         } catch (const std::exception&) {
             snapshot.sunshineConnected = false;
@@ -1870,6 +1885,8 @@ private:
     mutable std::mutex moonlightOptionsMutex_;
     std::unique_ptr<gateway::moonlight::MoonlightIdentity> identity_;
     gateway::ApplicationArtworkCache artworkCache_;
+    std::mutex applicationTitleMutex_;
+    std::unordered_map<std::string, std::string> applicationTitles_;
     std::unique_ptr<moonlight::H264AnnexBReader> videoSource_;
     std::unique_ptr<moonlight::OpusFileReader> audioSource_;
     Logger logger_;

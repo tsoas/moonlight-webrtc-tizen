@@ -16,7 +16,7 @@ class ConfigurationWindow {
 public:
     using StatusProvider = std::function<StatusState()>;
     using ManagementProvider = std::function<managementipc::Result(const managementipc::Command&)>;
-    enum class Page { Status, Sunshine, Network, About };
+    enum class Page { Status, Sunshine, Network };
 
     ~ConfigurationWindow();
     void show(HINSTANCE instance, StatusProvider statusProvider, ManagementProvider managementProvider);
@@ -29,6 +29,11 @@ private:
     void paint(HWND window);
     void selectPageFromPoint(HWND window, POINT point);
     void updateSunshineControls(HWND window);
+    void applyDpi(HWND window, UINT dpi);
+    void layoutControls(HWND window);
+    void recreateFonts();
+    void destroyFonts();
+    int scale(int logicalPixels) const;
     void startManagementOperation(managementipc::Command command);
     void updatePairingControls();
 
@@ -38,6 +43,13 @@ private:
     HWND testButton_ = nullptr;
     HWND pairButton_ = nullptr;
     HWND unpairButton_ = nullptr;
+    UINT dpi_ = 96;
+    HFONT titleFont_ = nullptr;
+    HFONT sectionFont_ = nullptr;
+    HFONT navigationFont_ = nullptr;
+    HFONT labelFont_ = nullptr;
+    HFONT valueFont_ = nullptr;
+    HFONT controlFont_ = nullptr;
     StatusProvider statusProvider_;
     ManagementProvider managementProvider_;
     Page page_ = Page::Status;

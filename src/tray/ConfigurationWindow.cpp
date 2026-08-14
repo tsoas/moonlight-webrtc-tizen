@@ -3,7 +3,6 @@
 #include "tray/WindowsTheme.h"
 
 #include <dwmapi.h>
-#include <shlobj.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +17,7 @@ namespace gateway::tray {
 namespace {
 
 constexpr wchar_t WindowClassName[] = L"MoonlightWebRTCConfigurationWindow";
+constexpr UINT WindowIconResourceId = 1;
 constexpr int HeaderHeight = 62;
 constexpr int NavigationLeft = 22;
 constexpr int NavigationTop = 82;
@@ -26,6 +26,10 @@ constexpr int NavigationItemHeight = 50;
 constexpr int ContentLeft = 214;
 constexpr int ContentTop = 82;
 constexpr int ContentBottom = 22;
+constexpr int DefaultClientWidth = 880;
+constexpr int DefaultClientHeight = 590;
+constexpr int MinimumClientWidth = 720;
+constexpr int MinimumClientHeight = 500;
 constexpr UINT SaveHostCommandId = 301;
 constexpr UINT TestHostCommandId = 302;
 constexpr UINT PairCommandId = 303;
@@ -41,14 +45,20 @@ constexpr std::array Pages{
     PageDefinition{ConfigurationWindow::Page::Status, L"Status"},
     PageDefinition{ConfigurationWindow::Page::Sunshine, L"Sunshine"},
     PageDefinition{ConfigurationWindow::Page::Network, L"Network"},
-    PageDefinition{ConfigurationWindow::Page::About, L"About"},
 };
 
-HFONT makeFont(int height, int weight = FW_NORMAL)
+HFONT makeFont(int logicalHeight, int weight, UINT dpi)
 {
-    return CreateFontW(-height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    return CreateFontW(-MulDiv(logicalHeight, static_cast<int>(dpi), 96), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                       OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+}
+
+RECT windowRectForClientSize(int width, int height, UINT dpi)
+{
+    RECT rect{0, 0, width, height};
+    AdjustWindowRectExForDpi(&rect, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+    return rect;
 }
 
 void fill(HDC dc, const RECT& area, COLORREF color)
@@ -95,6 +105,7 @@ std::wstring boolValue(const std::optional<bool>& value, const wchar_t* trueValu
 std::wstring applicationValue(const StatusState& state)
 {
     if (!state.status || !state.status->runningApplicationId) return L"None";
+    if (state.status->runningApplicationName) return widen(*state.status->runningApplicationName);
     return widen(*state.status->runningApplicationId);
 }
 
@@ -111,22 +122,12 @@ void enableDarkTitleBar(HWND window)
     }
 }
 
-std::wstring programDataPath()
-{
-    PWSTR directory = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &directory))) {
-        std::wstring path(directory);
-        CoTaskMemFree(directory);
-        return path + L"\\MoonlightWebRTC";
-    }
-    return L"Unavailable";
-}
-
 } // namespace
 
 ConfigurationWindow::~ConfigurationWindow()
 {
     if (operationThread_.joinable()) operationThread_.join();
+    destroyFonts();
 }
 
 void ConfigurationWindow::show(HINSTANCE instance, StatusProvider statusProvider,
@@ -135,7 +136,9 @@ void ConfigurationWindow::show(HINSTANCE instance, StatusProvider statusProvider
     statusProvider_ = std::move(statusProvider);
     managementProvider_ = std::move(managementProvider);
     if (window_) {
-        ShowWindow(window_, SW_RESTORE);
+        ShowWindow(window_, IsIconic(window_) ? SW_RESTORE : SW_SHOW);
+        SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         SetForegroundWindow(window_);
         return;
     }
@@ -144,15 +147,35 @@ void ConfigurationWindow::show(HINSTANCE instance, StatusProvider statusProvider
     windowClass.hInstance = instance;
     windowClass.lpfnWndProc = windowProcedure;
     windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(WindowIconResourceId));
     windowClass.hbrBackground = CreateSolidBrush(theme::PageBackground);
     windowClass.lpszClassName = WindowClassName;
     RegisterClassW(&windowClass);
 
+    const UINT dpi = GetDpiForSystem();
+    const RECT initialRect = windowRectForClientSize(
+        MulDiv(DefaultClientWidth, static_cast<int>(dpi), 96),
+        MulDiv(DefaultClientHeight, static_cast<int>(dpi), 96), dpi);
     window_ = CreateWindowExW(0, WindowClassName, L"Moonlight WebRTC",
-                              WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 880, 590,
+                              WS_OVERLAPPEDWINDOW,
+                              CW_USEDEFAULT, CW_USEDEFAULT, initialRect.right - initialRect.left,
+                              initialRect.bottom - initialRect.top,
                               nullptr, nullptr, instance, this);
-    if (window_) enableDarkTitleBar(window_);
+    if (window_) {
+        enableDarkTitleBar(window_);
+        const HICON smallIcon = static_cast<HICON>(LoadImageW(
+            instance, MAKEINTRESOURCEW(WindowIconResourceId), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
+        const HICON largeIcon = static_cast<HICON>(LoadImageW(
+            instance, MAKEINTRESOURCEW(WindowIconResourceId), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR | LR_SHARED));
+        SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
+        SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
+        ShowWindow(window_, SW_SHOWNORMAL);
+        SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(window_);
+    }
 }
 
 void ConfigurationWindow::close()
@@ -183,6 +206,29 @@ LRESULT CALLBACK ConfigurationWindow::windowProcedure(HWND window, UINT message,
 LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message) {
+    case WM_CREATE:
+        applyDpi(window, GetDpiForWindow(window));
+        return 0;
+    case WM_DPICHANGED: {
+        const UINT dpi = HIWORD(wParam);
+        const auto* recommended = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(window, nullptr, recommended->left, recommended->top,
+                     recommended->right - recommended->left, recommended->bottom - recommended->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        applyDpi(window, dpi);
+        return 0;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* minMax = reinterpret_cast<MINMAXINFO*>(lParam);
+        const RECT minimum = windowRectForClientSize(scale(MinimumClientWidth), scale(MinimumClientHeight), dpi_);
+        minMax->ptMinTrackSize.x = minimum.right - minimum.left;
+        minMax->ptMinTrackSize.y = minimum.bottom - minimum.top;
+        return 0;
+    }
+    case WM_SIZE:
+        layoutControls(window);
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
     case WM_PAINT:
         paint(window);
         return 0;
@@ -216,11 +262,26 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
         static const HBRUSH brush = CreateSolidBrush(theme::PanelFocus);
         return reinterpret_cast<LRESULT>(brush);
     }
-    case WM_CTLCOLORBTN:
-        SetTextColor(reinterpret_cast<HDC>(wParam), theme::TextPrimary);
-        SetBkColor(reinterpret_cast<HDC>(wParam), theme::PanelBackground);
-        static const HBRUSH brush = CreateSolidBrush(theme::PanelBackground);
-        return reinterpret_cast<LRESULT>(brush);
+    case WM_DRAWITEM: {
+        const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (item->CtlType != ODT_BUTTON) break;
+        const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+        const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+        fill(item->hDC, item->rcItem, pressed ? theme::PanelBorder : theme::PanelFocus);
+        const HBRUSH border = CreateSolidBrush(disabled ? theme::PanelBorder : theme::Accent);
+        FrameRect(item->hDC, &item->rcItem, border);
+        DeleteObject(border);
+        wchar_t text[128]{};
+        GetWindowTextW(item->hwndItem, text, static_cast<int>(std::size(text)));
+        RECT textArea = item->rcItem;
+        drawText(item->hDC, text, textArea, controlFont_,
+                 disabled ? theme::TextMuted : theme::TextPrimary, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        if (item->itemState & ODS_FOCUS) {
+            InflateRect(&textArea, -4, -4);
+            DrawFocusRect(item->hDC, &textArea);
+        }
+        return TRUE;
+    }
     case ManagementResultMessage:
         InvalidateRect(window, nullptr, FALSE);
         return 0;
@@ -230,6 +291,7 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
     case WM_DESTROY:
         window_ = nullptr;
         hostEdit_ = saveButton_ = testButton_ = pairButton_ = unpairButton_ = nullptr;
+        destroyFonts();
         return 0;
     default:
         return DefWindowProcW(window, message, wParam, lParam);
@@ -239,11 +301,11 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
 
 void ConfigurationWindow::selectPageFromPoint(HWND window, POINT point)
 {
-    if (point.x < NavigationLeft || point.x >= NavigationLeft + NavigationWidth
-        || point.y < NavigationTop || point.y >= NavigationTop + static_cast<int>(Pages.size()) * NavigationItemHeight) {
+    if (point.x < scale(NavigationLeft) || point.x >= scale(NavigationLeft + NavigationWidth)
+        || point.y < scale(NavigationTop) || point.y >= scale(NavigationTop + static_cast<int>(Pages.size()) * NavigationItemHeight)) {
         return;
     }
-    const auto index = static_cast<std::size_t>((point.y - NavigationTop) / NavigationItemHeight);
+    const auto index = static_cast<std::size_t>((point.y - scale(NavigationTop)) / scale(NavigationItemHeight));
     page_ = Pages[index].page;
     updateSunshineControls(window);
     statusChanged();
@@ -254,19 +316,21 @@ void ConfigurationWindow::updateSunshineControls(HWND window)
     const bool sunshine = page_ == Page::Sunshine;
     if (sunshine && !hostEdit_) {
         hostEdit_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-                                    ContentLeft + 320, ContentTop + 77, 278, 30, window, nullptr, nullptr, nullptr);
-        saveButton_ = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                                      ContentLeft + 320, ContentTop + 122, 92, 30, window,
+                                    0, 0, 0, 0, window, nullptr, nullptr, nullptr);
+        saveButton_ = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                                      0, 0, 0, 0, window,
                                       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(SaveHostCommandId)), nullptr, nullptr);
-        testButton_ = CreateWindowExW(0, L"BUTTON", L"Test Connection", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                                      ContentLeft + 422, ContentTop + 122, 176, 30, window,
+        testButton_ = CreateWindowExW(0, L"BUTTON", L"Test Connection", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                                      0, 0, 0, 0, window,
                                       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(TestHostCommandId)), nullptr, nullptr);
-        pairButton_ = CreateWindowExW(0, L"BUTTON", L"Pair", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                                      ContentLeft + 320, ContentTop + 162, 92, 30, window,
+        pairButton_ = CreateWindowExW(0, L"BUTTON", L"Pair", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                                      0, 0, 0, 0, window,
                                       reinterpret_cast<HMENU>(static_cast<UINT_PTR>(PairCommandId)), nullptr, nullptr);
-        unpairButton_ = CreateWindowExW(0, L"BUTTON", L"Unpair", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                                        ContentLeft + 422, ContentTop + 162, 176, 30, window,
+        unpairButton_ = CreateWindowExW(0, L"BUTTON", L"Unpair", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                                        0, 0, 0, 0, window,
                                         reinterpret_cast<HMENU>(static_cast<UINT_PTR>(UnpairCommandId)), nullptr, nullptr);
+        applyDpi(window, GetDpiForWindow(window));
+        layoutControls(window);
         const StatusState state = statusProvider_ ? statusProvider_() : StatusState{};
         if (state.status && state.status->sunshineHost) SetWindowTextW(hostEdit_, widen(*state.status->sunshineHost).c_str());
     }
@@ -276,6 +340,73 @@ void ConfigurationWindow::updateSunshineControls(HWND window)
         ShowWindow(testButton_, sunshine ? SW_SHOW : SW_HIDE);
         updatePairingControls();
     }
+}
+
+int ConfigurationWindow::scale(int logicalPixels) const
+{
+    return MulDiv(logicalPixels, static_cast<int>(dpi_), 96);
+}
+
+void ConfigurationWindow::destroyFonts()
+{
+    const auto destroy = [](HFONT& font) {
+        if (font) DeleteObject(font);
+        font = nullptr;
+    };
+    destroy(titleFont_);
+    destroy(sectionFont_);
+    destroy(navigationFont_);
+    destroy(labelFont_);
+    destroy(valueFont_);
+    destroy(controlFont_);
+}
+
+void ConfigurationWindow::recreateFonts()
+{
+    destroyFonts();
+    titleFont_ = makeFont(21, FW_BOLD, dpi_);
+    sectionFont_ = makeFont(25, FW_BOLD, dpi_);
+    navigationFont_ = makeFont(16, FW_BOLD, dpi_);
+    labelFont_ = makeFont(15, FW_NORMAL, dpi_);
+    valueFont_ = makeFont(16, FW_NORMAL, dpi_);
+    controlFont_ = makeFont(15, FW_SEMIBOLD, dpi_);
+}
+
+void ConfigurationWindow::applyDpi(HWND window, UINT dpi)
+{
+    dpi_ = dpi ? dpi : 96;
+    recreateFonts();
+    for (HWND control : {hostEdit_, saveButton_, testButton_, pairButton_, unpairButton_}) {
+        if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(controlFont_), TRUE);
+    }
+    layoutControls(window);
+    InvalidateRect(window, nullptr, FALSE);
+}
+
+void ConfigurationWindow::layoutControls(HWND window)
+{
+    if (!hostEdit_) return;
+    RECT client{};
+    GetClientRect(window, &client);
+    const int panelLeft = scale(ContentLeft);
+    const int panelRight = client.right - scale(22);
+    const int valueLeft = panelLeft + (panelRight - panelLeft) / 2;
+    const int rightMargin = scale(28);
+    const int controlRight = panelRight - rightMargin;
+    const int controlWidth = (std::max)(scale(180), controlRight - valueLeft);
+    const int controlHeight = scale(30);
+    const int editTop = scale(ContentTop + 77);
+    const int buttonTop = scale(ContentTop + 122);
+    const int pairingTop = scale(ContentTop + 162);
+    const int saveWidth = scale(92);
+    const int gap = scale(10);
+    MoveWindow(hostEdit_, valueLeft, editTop, controlWidth, controlHeight, TRUE);
+    MoveWindow(saveButton_, valueLeft, buttonTop, saveWidth, controlHeight, TRUE);
+    MoveWindow(testButton_, valueLeft + saveWidth + gap, buttonTop,
+               (std::max)(scale(120), controlWidth - saveWidth - gap), controlHeight, TRUE);
+    MoveWindow(pairButton_, valueLeft, pairingTop, saveWidth, controlHeight, TRUE);
+    MoveWindow(unpairButton_, valueLeft + saveWidth + gap, pairingTop,
+               (std::max)(scale(120), controlWidth - saveWidth - gap), controlHeight, TRUE);
 }
 
 void ConfigurationWindow::updatePairingControls()
@@ -331,22 +462,17 @@ void ConfigurationWindow::paint(HWND window)
     GetClientRect(window, &client);
     fill(dc, client, theme::PageBackground);
 
-    RECT header{0, 0, client.right, HeaderHeight};
+    RECT header{0, 0, client.right, scale(HeaderHeight)};
     fill(dc, header, theme::TopBar);
-    const HFONT titleFont = makeFont(21, FW_BOLD);
-    const HFONT sectionFont = makeFont(25, FW_BOLD);
-    const HFONT navigationFont = makeFont(16, FW_BOLD);
-    const HFONT labelFont = makeFont(15);
-    const HFONT valueFont = makeFont(16);
-    drawText(dc, L"Moonlight WebRTC", RECT{NavigationLeft, 0, client.right - 20, HeaderHeight},
-             titleFont, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER);
+    drawText(dc, L"Moonlight WebRTC", RECT{scale(NavigationLeft), 0, client.right - scale(20), scale(HeaderHeight)},
+             titleFont_, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER);
 
     for (std::size_t index = 0; index < Pages.size(); ++index) {
-        RECT item{NavigationLeft, NavigationTop + static_cast<int>(index) * NavigationItemHeight,
-                  NavigationLeft + NavigationWidth, NavigationTop + static_cast<int>(index + 1) * NavigationItemHeight - 4};
+        RECT item{scale(NavigationLeft), scale(NavigationTop + static_cast<int>(index) * NavigationItemHeight),
+                  scale(NavigationLeft + NavigationWidth), scale(NavigationTop + static_cast<int>(index + 1) * NavigationItemHeight - 4)};
         fill(dc, item, Pages[index].page == page_ ? theme::PanelFocus : theme::PanelBackground);
         if (Pages[index].page == page_) {
-            const HPEN pen = CreatePen(PS_SOLID, 2, theme::Accent);
+            const HPEN pen = CreatePen(PS_SOLID, scale(2), theme::Accent);
             const HGDIOBJ oldPen = SelectObject(dc, pen);
             const HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
             Rectangle(dc, item.left, item.top, item.right, item.bottom);
@@ -354,29 +480,29 @@ void ConfigurationWindow::paint(HWND window)
             SelectObject(dc, oldPen);
             DeleteObject(pen);
         }
-        item.left += 16;
-        drawText(dc, Pages[index].label, item, navigationFont, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER);
+        item.left += scale(16);
+        drawText(dc, Pages[index].label, item, navigationFont_, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER);
     }
 
-    RECT panel{ContentLeft, ContentTop, client.right - 22, client.bottom - ContentBottom};
+    RECT panel{scale(ContentLeft), scale(ContentTop), client.right - scale(22), client.bottom - scale(ContentBottom)};
     fill(dc, panel, theme::PanelBackground);
     const StatusState state = statusProvider_ ? statusProvider_() : StatusState{};
     const auto addRows = [&](const wchar_t* title, const std::vector<std::pair<std::wstring, std::wstring>>& rows,
                              int top = 0) {
-        RECT titleArea{panel.left + 28, panel.top + 24, panel.right - 28, panel.top + 60};
-        drawText(dc, title, titleArea, sectionFont, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER);
-        if (top == 0) top = panel.top + 78;
+        RECT titleArea{panel.left + scale(28), panel.top + scale(24), panel.right - scale(28), panel.top + scale(60)};
+        drawText(dc, title, titleArea, sectionFont_, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER);
+        if (top == 0) top = panel.top + scale(78);
         for (const auto& [label, value] : rows) {
-            const RECT divider{panel.left + 28, top - 8, panel.right - 28, top - 7};
+            const RECT divider{panel.left + scale(28), top - scale(8), panel.right - scale(28), top - scale(7)};
             fill(dc, divider, theme::PanelBorder);
-            RECT labelArea{panel.left + 28, top, panel.left + (panel.right - panel.left) / 2, top + 45};
-            RECT valueArea{panel.left + (panel.right - panel.left) / 2, top, panel.right - 28, top + 45};
-            drawText(dc, label, labelArea, labelFont, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER);
+            RECT labelArea{panel.left + scale(28), top, panel.left + (panel.right - panel.left) / 2, top + scale(45)};
+            RECT valueArea{panel.left + (panel.right - panel.left) / 2, top, panel.right - scale(28), top + scale(45)};
+            drawText(dc, label, labelArea, labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER);
             const COLORREF valueColor = value == L"Running" || value == L"Connected" || value == L"Paired"
                 ? theme::AccentHover : value == L"Unavailable" || value == L"Disconnected" || value == L"Not paired"
                 ? theme::TextMuted : theme::TextPrimary;
-            drawText(dc, value, valueArea, valueFont, valueColor, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS);
-            top += 58;
+            drawText(dc, value, valueArea, valueFont_, valueColor, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS);
+            top += scale(58);
         }
     };
 
@@ -389,47 +515,33 @@ void ConfigurationWindow::paint(HWND window)
             {L"Connected TVs", state.status && state.status->connectedTvClients ? std::to_wstring(*state.status->connectedTvClients) : L"0"},
         });
     } else if (page_ == Page::Sunshine) {
-        const RECT hostDivider{panel.left + 28, panel.top + 70, panel.right - 28, panel.top + 71};
+        const RECT hostDivider{panel.left + scale(28), panel.top + scale(70), panel.right - scale(28), panel.top + scale(71)};
         fill(dc, hostDivider, theme::PanelBorder);
-        drawText(dc, L"Host", RECT{panel.left + 28, panel.top + 78, panel.left + (panel.right - panel.left) / 2, panel.top + 123},
-                 labelFont, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER);
+        drawText(dc, L"Host", RECT{panel.left + scale(28), panel.top + scale(78), panel.left + (panel.right - panel.left) / 2, panel.top + scale(123)},
+                 labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER);
         addRows(L"Sunshine", {
             {L"Connection", state.status ? boolValue(state.status->sunshineConnected, L"Connected", L"Disconnected") : L"Unavailable"},
             {L"Pairing", state.status ? boolValue(state.status->sunshinePaired, L"Paired", L"Not paired") : L"Unavailable"},
             {L"Running application", applicationValue(state)},
             {L"Session", state.status && state.status->sessionActive && *state.status->sessionActive ? L"Active" : L"Inactive"},
-        }, panel.top + 218);
+        }, panel.top + scale(218));
         std::wstring operation;
         {
             std::lock_guard lock(operationMutex_);
             operation = operationStatus_;
         }
         if (!operation.empty()) {
-            drawText(dc, operation, RECT{panel.left + 28, panel.bottom - 28, panel.right - 28, panel.bottom - 6},
-                     labelFont, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            drawText(dc, operation, RECT{panel.left + scale(28), panel.bottom - scale(28), panel.right - scale(28), panel.bottom - scale(6)},
+                     labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
     } else if (page_ == Page::Network) {
         addRows(L"Network", {
             {L"Gateway address", L"All interfaces (0.0.0.0)"},
             {L"Gateway port", L"8000"},
             {L"Connected TVs", state.status && state.status->connectedTvClients ? std::to_wstring(*state.status->connectedTvClients) : L"0"},
-            {L"Management IPC", L"Local named pipe"},
-        });
-    } else {
-        addRows(L"About", {
-            {L"Product", L"Moonlight WebRTC"},
-            {L"Architecture", L"Gateway service + tray"},
-            {L"Data location", programDataPath()},
-            {L"Windows service", L"MoonlightWebRTCGateway"},
-            {L"Local IPC protocol", L"Version 1"},
         });
     }
 
-    DeleteObject(valueFont);
-    DeleteObject(labelFont);
-    DeleteObject(navigationFont);
-    DeleteObject(sectionFont);
-    DeleteObject(titleFont);
     EndPaint(window, &paint);
 }
 
