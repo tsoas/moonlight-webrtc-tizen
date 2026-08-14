@@ -50,6 +50,13 @@ add_library(application_artwork_cache
 target_compile_features(application_artwork_cache PUBLIC cxx_std_20)
 target_include_directories(application_artwork_cache PUBLIC src)
 
+add_library(gateway_lifecycle
+    src/gateway/GatewayLifecycle.cpp
+)
+
+target_compile_features(gateway_lifecycle PUBLIC cxx_std_20)
+target_include_directories(gateway_lifecycle PUBLIC src)
+
 add_library(moonlight_video_profile
     src/moonlight/MoonlightVideoProfile.cpp
 )
@@ -112,11 +119,13 @@ target_link_libraries(moonlight_control PUBLIC
 
 add_executable(moonlight_webrtc
     src/main.cpp
+    src/gateway/WindowsServiceHost.cpp
 )
 
 target_compile_features(moonlight_webrtc PRIVATE cxx_std_20)
 target_link_libraries(moonlight_webrtc PRIVATE
     application_artwork_cache
+    gateway_lifecycle
     gateway_protocol
     h264_annex_b_reader
     moonlight_control
@@ -126,6 +135,7 @@ target_link_libraries(moonlight_webrtc PRIVATE
     webrtc_media_sender
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
+    advapi32
 )
 
 set_target_properties(moonlight_webrtc PROPERTIES
@@ -217,5 +227,15 @@ if(BUILD_TESTING)
     add_test(
         NAME webrtc_media_sender_test
         COMMAND webrtc_media_sender_test
+    )
+
+    add_executable(gateway_lifecycle_test
+        tests/GatewayLifecycleTest.cpp
+    )
+    target_link_libraries(gateway_lifecycle_test PRIVATE gateway_lifecycle)
+
+    add_test(
+        NAME gateway_lifecycle_test
+        COMMAND gateway_lifecycle_test
     )
 endif()

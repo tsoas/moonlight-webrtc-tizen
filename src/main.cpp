@@ -1,7 +1,9 @@
 #include "H264AnnexBReader.h"
 #include "OpusFileReader.h"
 #include "gateway/ApplicationArtworkCache.h"
+#include "gateway/GatewayLifecycle.h"
 #include "gateway/GatewayProtocol.h"
+#include "gateway/WindowsServiceHost.h"
 #include "media/MediaSender.h"
 #include "moonlight/MoonlightMediaBridge.h"
 #include "moonlight/control/MoonlightIdentity.h"
@@ -19,6 +21,9 @@
 #include <csignal>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -53,7 +58,7 @@ constexpr auto RtpCname = "moonlight-webrtc";
 constexpr auto MediaStreamId = "stream1";
 // Artwork is capped at 8 MiB before Base64 and JSON framing expand it for WebSocket transport.
 constexpr std::size_t MaxGatewayWebSocketMessageSize = 12 * 1024 * 1024;
-volatile std::sig_atomic_t ShutdownRequested = 0;
+volatile std::sig_atomic_t ConsoleShutdownRequested = 0;
 
 std::string base64Encode(const std::vector<std::uint8_t>& bytes)
 {
@@ -78,7 +83,7 @@ int runningSunshineApplicationId(const gateway::moonlight::SunshineServerInfo& s
 
 void requestShutdown(int)
 {
-    ShutdownRequested = 1;
+    ConsoleShutdownRequested = 1;
 }
 
 std::string_view videoMediaSection(std::string_view sdp)
@@ -108,11 +113,18 @@ enum class MediaSourceMode {
     Moonlight,
 };
 
+enum class ProgramHostMode {
+    Console,
+    Service,
+};
+
 struct ProgramOptions {
     MediaSourceMode sourceMode = MediaSourceMode::Test;
     std::optional<std::string> host;
     std::string application = "Desktop";
     bool pair = false;
+    ProgramHostMode hostMode = ProgramHostMode::Console;
+    std::optional<std::filesystem::path> dataDirectory;
 };
 
 ProgramOptions parseProgramOptions(int argc, char** argv)
@@ -130,17 +142,36 @@ ProgramOptions parseProgramOptions(int argc, char** argv)
             options.application = std::string(argument.substr(6));
         } else if (argument == "--pair") {
             options.pair = true;
+        } else if (argument == "--console") {
+            options.hostMode = ProgramHostMode::Console;
+        } else if (argument == "--service") {
+            options.hostMode = ProgramHostMode::Service;
+        } else if (argument.starts_with("--data-dir=") && argument.size() > 11) {
+            options.dataDirectory = std::filesystem::path(argument.substr(11));
         } else {
             throw std::invalid_argument(
                 "Usage: moonlight_webrtc [--source=test|--source=moonlight] "
-                "[--host=<host>] [--app=<name>] [--pair]");
+                "[--host=<host>] [--app=<name>] [--pair] [--console|--service] "
+                "[--data-dir=<path>]");
         }
     }
 
     if (options.sourceMode != MediaSourceMode::Moonlight
-        && (options.host || options.application != "Desktop" || options.pair)) {
+        && (options.host || options.application != "Desktop" || options.pair || options.dataDirectory)) {
         throw std::invalid_argument(
-            "--host, --app, and --pair require --source=moonlight");
+            "--host, --app, --pair, and --data-dir require --source=moonlight");
+    }
+    if (options.pair && options.hostMode == ProgramHostMode::Service) {
+        throw std::invalid_argument("--pair cannot run as a Windows service");
+    }
+    if (options.hostMode == ProgramHostMode::Service) {
+        if (options.sourceMode != MediaSourceMode::Moonlight) {
+            throw std::invalid_argument("--service requires --source=moonlight");
+        }
+        if (!options.dataDirectory || !std::filesystem::is_directory(*options.dataDirectory)) {
+            throw std::invalid_argument(
+                "--service requires an existing --data-dir containing the Moonlight identity");
+        }
     }
     return options;
 }
@@ -211,16 +242,23 @@ struct Session {
     std::thread streamingThread;
 };
 
+using Logger = std::function<void(const std::string&)>;
+
 class SignalingServer {
 public:
-    explicit SignalingServer(const ProgramOptions& options)
+    explicit SignalingServer(const ProgramOptions& options, Logger logger)
         : sourceMode_(options.sourceMode)
         , moonlightOptions_{options.host, options.application}
         , identity_(sourceMode_ == MediaSourceMode::Moonlight
-                        ? std::make_unique<gateway::moonlight::MoonlightIdentity>()
+                        ? std::make_unique<gateway::moonlight::MoonlightIdentity>(
+                            options.dataDirectory.value_or(
+                                gateway::moonlight::MoonlightIdentity::defaultStorageDirectory()))
                         : nullptr)
+        , logger_(std::move(logger))
         , server_(makeServerConfiguration())
     {
+        moonlightOptions_.allowUnavailableHostDisplayForHdr =
+            options.hostMode == ProgramHostMode::Service;
         log("Moonlight WebRTC Gateway");
         server_.onClient([this](std::shared_ptr<rtc::WebSocket> socket) {
             acceptClient(std::move(socket));
@@ -258,11 +296,14 @@ public:
         }
     }
 
-    void wait()
+    void wait(gateway::GatewayShutdownSignal& shutdown)
     {
-        std::unique_lock lock(waitMutex_);
-        while (!ShutdownRequested) {
-            waitCondition_.wait_for(lock, std::chrono::milliseconds(200));
+        while (!shutdown.requested()) {
+            if (ConsoleShutdownRequested) {
+                shutdown.request();
+                break;
+            }
+            shutdown.waitFor(std::chrono::milliseconds(200));
         }
     }
 
@@ -280,7 +321,7 @@ private:
     void log(const std::string& message)
     {
         const std::lock_guard lock(logMutex_);
-        std::cout << message << std::endl;
+        logger_(message);
     }
 
     void acceptClient(std::shared_ptr<rtc::WebSocket> socket)
@@ -1589,19 +1630,19 @@ private:
     gateway::ApplicationArtworkCache artworkCache_;
     std::unique_ptr<moonlight::H264AnnexBReader> videoSource_;
     std::unique_ptr<moonlight::OpusFileReader> audioSource_;
+    Logger logger_;
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;
     std::atomic<std::uint64_t> nextSessionId_ = 1;
     rtc::WebSocketServer server_;
 
-    std::mutex waitMutex_;
-    std::condition_variable waitCondition_;
 };
 
 int runMoonlightPairing(const ProgramOptions& options)
 {
-    gateway::moonlight::MoonlightIdentity identity;
+    gateway::moonlight::MoonlightIdentity identity(
+        options.dataDirectory.value_or(gateway::moonlight::MoonlightIdentity::defaultStorageDirectory()));
     const auto logger = [](const std::string& message) {
         std::cout << message << std::endl;
     };
@@ -1678,6 +1719,50 @@ int runMoonlightPairing(const ProgramOptions& options)
     return 0;
 }
 
+class RuntimeLogger {
+public:
+    explicit RuntimeLogger(const ProgramOptions& options)
+        : console_(options.hostMode == ProgramHostMode::Console)
+    {
+        if (options.hostMode == ProgramHostMode::Service) {
+            const auto logPath = *options.dataDirectory / "gateway-service.log";
+            file_.open(logPath, std::ios::out | std::ios::app);
+            if (!file_) {
+                throw std::runtime_error("Unable to open service log: " + logPath.string());
+            }
+        }
+    }
+
+    void operator()(const std::string& message)
+    {
+        std::lock_guard lock(mutex_);
+        if (console_) {
+            std::cout << message << std::endl;
+        }
+        if (file_) {
+            file_ << message << '\n';
+            file_.flush();
+        }
+    }
+
+private:
+    bool console_ = false;
+    std::ofstream file_;
+    std::mutex mutex_;
+};
+
+int runGatewayRuntime(const ProgramOptions& options,
+                      gateway::GatewayShutdownSignal& shutdown,
+                      RuntimeLogger& logger,
+                      const gateway::WindowsServiceHost::ReadyCallback& ready)
+{
+    SignalingServer server(options, std::ref(logger));
+    ready();
+    server.wait(shutdown);
+    logger("Gateway runtime stopped");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1688,10 +1773,21 @@ int main(int argc, char** argv)
             return runMoonlightPairing(options);
         }
 
+        RuntimeLogger logger(options);
+        gateway::GatewayShutdownSignal shutdown;
+        const auto runtime = [&options, &shutdown, &logger](
+                                 const gateway::WindowsServiceHost::ReadyCallback& ready) {
+            return runGatewayRuntime(options, shutdown, logger, ready);
+        };
+
+        if (options.hostMode == ProgramHostMode::Service) {
+            return gateway::WindowsServiceHost::run(
+                L"MoonlightWebRTCGateway", shutdown, runtime);
+        }
+
         std::signal(SIGINT, requestShutdown);
         std::signal(SIGTERM, requestShutdown);
-        SignalingServer server(options);
-        server.wait();
+        return runtime([] {});
     } catch (const std::exception& error) {
         std::cerr << "Fatal error: " << error.what() << '\n';
         return 1;

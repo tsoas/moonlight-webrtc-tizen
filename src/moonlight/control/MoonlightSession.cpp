@@ -229,6 +229,16 @@ STREAM_CONFIGURATION MoonlightSession::createStreamConfiguration(
     return configuration;
 }
 
+bool MoonlightSession::isHdrHostDisplayAcceptable(
+    const std::optional<platform::WindowsDisplayState>& hostDisplay,
+    const bool allowUnavailableHostDisplayForHdr)
+{
+    if (!hostDisplay) {
+        return allowUnavailableHostDisplayForHdr;
+    }
+    return hostDisplay->hdrSupported && hostDisplay->hdrEnabled;
+}
+
 void MoonlightSession::start()
 {
     State expected = State::Idle;
@@ -254,9 +264,15 @@ void MoonlightSession::start()
             log("Host HDR state before session: unavailable");
         }
         if (options_.settings.hdr
-            && (!hostDisplay || !hostDisplay->hdrSupported || !hostDisplay->hdrEnabled)) {
+            && !isHdrHostDisplayAcceptable(
+                hostDisplay, options_.allowUnavailableHostDisplayForHdr)) {
             throw std::runtime_error(
                 "HDR session rejected: Windows HDR must already be enabled on the primary display");
+        }
+        if (options_.settings.hdr && !hostDisplay
+            && options_.allowUnavailableHostDisplayForHdr) {
+            log("Host display HDR state cannot be queried from the Windows service session; "
+                "continuing without changing the host display and validating the received HDR stream");
         }
         if (options_.settings.hdr
             && (detected.serverInfo.serverCodecModeSupport & SCM_HEVC_MAIN10) == 0) {

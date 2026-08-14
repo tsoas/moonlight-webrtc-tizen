@@ -4,6 +4,7 @@
 #include "moonlight/MoonlightMediaBridge.h"
 #include "moonlight/control/MoonlightControlTypes.h"
 #include "moonlight/control/MoonlightIdentity.h"
+#include "platform/WindowsDisplayState.h"
 #include "session/StreamSettings.h"
 
 #include <atomic>
@@ -22,6 +23,9 @@ struct MoonlightSessionOptions {
     std::string application = "Desktop";
     std::optional<int> applicationId;
     StreamSettings settings = defaultStreamSettings();
+    // Windows services run outside the interactive display session. HDR is
+    // still validated against the actual Main10/Rec.2020 stream metadata.
+    bool allowUnavailableHostDisplayForHdr = false;
 };
 
 struct DetectedSunshine {
@@ -75,6 +79,9 @@ public:
                                            const std::optional<std::string>& requestedHost,
                                            const Logger& logger);
     static STREAM_CONFIGURATION createStreamConfiguration(const StreamSettings& settings);
+    static bool isHdrHostDisplayAcceptable(
+        const std::optional<platform::WindowsDisplayState>& hostDisplay,
+        bool allowUnavailableHostDisplayForHdr);
 
     // Sunshine uses SOPS as permission to change the host display mode. Stream
     // dimensions select encoder output only and must never alter Windows display state.

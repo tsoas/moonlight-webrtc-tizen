@@ -123,6 +123,23 @@ int main()
         settingsHdr1440.hdr = true;
         auto settingsHdr4k = settingsHevc4k;
         settingsHdr4k.hdr = true;
+        const gateway::platform::WindowsDisplayState hdrEnabledDisplay{
+            "DISPLAY1", 2560, 1440, 144, true, true};
+        const gateway::platform::WindowsDisplayState hdrDisabledDisplay{
+            "DISPLAY1", 2560, 1440, 144, true, false};
+        const gateway::platform::WindowsDisplayState sdrOnlyDisplay{
+            "DISPLAY1", 2560, 1440, 144, false, false};
+        require(gateway::moonlight::MoonlightSession::isHdrHostDisplayAcceptable(
+                    hdrEnabledDisplay, false)
+                    && !gateway::moonlight::MoonlightSession::isHdrHostDisplayAcceptable(
+                        hdrDisabledDisplay, false)
+                    && !gateway::moonlight::MoonlightSession::isHdrHostDisplayAcceptable(
+                        sdrOnlyDisplay, false)
+                    && !gateway::moonlight::MoonlightSession::isHdrHostDisplayAcceptable(
+                        std::nullopt, false)
+                    && gateway::moonlight::MoonlightSession::isHdrHostDisplayAcceptable(
+                        std::nullopt, true),
+                "HDR host-display validation no longer distinguishes console and service sessions");
         const auto streamConfiguration =
             gateway::moonlight::MoonlightSession::createStreamConfiguration(settings720);
         require(streamConfiguration.width == 1280 && streamConfiguration.height == 720
