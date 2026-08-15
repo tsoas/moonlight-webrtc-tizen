@@ -109,6 +109,20 @@ assert.ok(appSource.includes("setRunningApplication(message.runningAppId)"),
   "Gateway running application state must reach the cards");
 assert.ok(appSource.includes("Stream disconnected. Running applications remain available."),
   "local disconnect must preserve Sunshine running state until the app list refreshes");
+assert.ok(html.includes('id="launching-screen"')
+  && html.includes('id="launching-app"')
+  && html.includes('id="launching-status"'),
+  "application launch must present a dedicated, readable progress screen");
+assert.ok(appSource.includes("function launchingStep(state)")
+  && appSource.includes('"starting-webrtc"')
+  && appSource.includes('"connecting-sunshine"')
+  && appSource.includes('"starting-moonlight"'),
+  "launch progress must describe the existing Gateway session stages");
+assert.ok(appSource.includes("function cancelLaunchingSession()")
+  && appSource.includes('type: "stop-session"'),
+  "Back during application launch must cancel through the existing session teardown");
+assert.ok(uiCss.includes(".launching-screen") && uiCss.includes("var(--accent)"),
+  "launch progress must retain the approved dark and violet visual language");
 assert.ok(html.includes('id="running-app-menu"')
   && html.includes("Resume session") && html.includes("Stop session"),
   "running applications require a resume/stop context menu");

@@ -75,6 +75,18 @@
     <footer id="control-hints" class="control-hints" aria-label="Remote control hints"><span><kbd>OK</kbd><span id="hint-primary">Select</span></span><span><kbd class="back-key">&#8592;</kbd><span id="hint-back">Back</span></span></footer>
   </main>
 
+  <section id="launching-screen" class="launching-screen" hidden aria-live="polite" aria-labelledby="launching-heading">
+    <div class="launching-panel">
+      <img class="launching-mark" src="assets/moonlight-logo.svg" alt="">
+      <p class="launching-eyebrow">Starting game</p>
+      <h1 id="launching-heading">Preparing session</h1>
+      <p id="launching-app" class="launching-app">Application</p>
+      <p id="launching-status" class="launching-status" role="status">Preparing connection…</p>
+      <div id="launching-progress" class="launching-progress" data-stage="1" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <p class="launching-hint"><kbd class="back-key">←</kbd> Cancel</p>
+    </div>
+  </section>
+
   <section id="streaming-screen" class="streaming-screen" hidden aria-label="Streaming session">
     <aside id="stream-overlay" class="stream-overlay"><h2 id="overlay-app">Desktop</h2><dl class="stream-facts"><div><dt>Resolution</dt><dd id="overlay-resolution">-</dd></div><div><dt>FPS</dt><dd id="overlay-fps">60</dd></div><div><dt>Codec</dt><dd id="overlay-codec">H.264</dd></div><div><dt>Bitrate</dt><dd id="overlay-bitrate">-</dd></div><div><dt>HDR</dt><dd id="overlay-hdr">Off</dd></div><div><dt>Gamepad</dt><dd id="overlay-gamepad">Disconnected</dd></div><div><dt>Connection</dt><dd id="overlay-connection">Starting</dd></div></dl></aside>
     <div id="stream-menu" class="stream-menu" hidden><section class="menu-panel" aria-label="Stream menu"><h2>Streaming</h2><div class="menu-actions"><button id="continue-button" class="menu-button focusable" type="button">Resume</button><button id="diagnostics-button" class="menu-button focusable" type="button">Show statistics</button><button id="stop-button" class="menu-button menu-button-danger focusable" type="button">Stop streaming</button></div><p class="menu-hint"><kbd>OK</kbd> Select <kbd class="back-key">&#8592;</kbd> Resume</p></section></div>

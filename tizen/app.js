@@ -7,6 +7,10 @@ const gatewayStore = GatewayStore.create();
 
 const homeScreen = document.getElementById("home-screen");
 const streamingScreen = document.getElementById("streaming-screen");
+const launchingScreen = document.getElementById("launching-screen");
+const launchingAppElement = document.getElementById("launching-app");
+const launchingStatusElement = document.getElementById("launching-status");
+const launchingProgressElement = document.getElementById("launching-progress");
 const videoElement = document.getElementById("video");
 const diagnosticsElement = document.getElementById("diagnostics");
 const logElement = document.getElementById("log");
@@ -153,6 +157,8 @@ let controlDataChannel = null;
 let gamepadDataChannel = null;
 let gamepadInputSessionInitialized = false;
 let sessionTeardownInProgress = false;
+let launchCancellationRequested = false;
+let launchCancellationSent = false;
 let openSettingSelect = null;
 let videoModes = [];
 let codecSelectionWasIntentional = false;
@@ -791,8 +797,69 @@ function handleGatewayError(message) {
   if (sessionState !== "streaming") {
     sessionState = "idle";
     sessionStateElement.textContent = "Idle";
+    if (!launchingScreen.hidden) {
+      showHome("applications");
+    }
     updatePlayAvailability();
   }
+}
+
+function launchingStep(state) {
+  const steps = {
+    starting: { stage: 1, text: "Preparing your session…" },
+    "starting-webrtc": { stage: 2, text: "Preparing WebRTC connection…" },
+    "connecting-sunshine": { stage: 3, text: "Connecting to Sunshine…" },
+    "starting-moonlight": { stage: 4, text: "Starting Moonlight…" },
+  };
+  return steps[state] || { stage: 1, text: "Preparing your session…" };
+}
+
+function updateLaunchingScreen(state) {
+  if (launchingScreen.hidden) {
+    return;
+  }
+  if (launchCancellationRequested) {
+    launchingStatusElement.textContent = "Cancelling launch…";
+    return;
+  }
+  const step = launchingStep(state);
+  launchingStatusElement.textContent = step.text;
+  launchingProgressElement.dataset.stage = String(step.stage);
+}
+
+function showLaunching() {
+  homeScreen.hidden = true;
+  streamingScreen.hidden = true;
+  videoElement.hidden = true;
+  launchingAppElement.textContent = selectedSession ? selectedSession.appTitle : "Application";
+  launchingScreen.hidden = false;
+  updateLaunchingScreen("starting");
+}
+
+function requestLaunchCancellation() {
+  if (!currentSessionId || launchCancellationSent) {
+    return;
+  }
+  try {
+    launchCancellationSent = true;
+    sessionTeardownInProgress = true;
+    sessionState = "stopping";
+    sessionStateElement.textContent = "Stopping";
+    sendGatewayMessage({ type: "stop-session" });
+  } catch (error) {
+    launchCancellationSent = false;
+    reportError("Unable to cancel session launch", error);
+  }
+}
+
+function cancelLaunchingSession() {
+  if (launchingScreen.hidden) {
+    return false;
+  }
+  launchCancellationRequested = true;
+  updateLaunchingScreen();
+  requestLaunchCancellation();
+  return true;
 }
 
 function readableState(state) {
@@ -804,6 +871,9 @@ function handleSessionStatus(message) {
   sessionStateElement.textContent = readableState(message.state);
   if (typeof message.sessionId === "number") {
     currentSessionId = message.sessionId;
+  }
+  if (launchCancellationRequested) {
+    requestLaunchCancellation();
   }
   if (message.video) {
     selectedSession = {
@@ -820,12 +890,23 @@ function handleSessionStatus(message) {
 
   overlay.connection.textContent = readableState(message.state);
   if (message.state === "streaming") {
+    if (launchCancellationRequested) {
+      requestLaunchCancellation();
+      updateLaunchingScreen();
+      updatePlayAvailability();
+      log("Session status: streaming (cancelling)");
+      return;
+    }
+    launchCancellationRequested = false;
+    launchCancellationSent = false;
     hostOperationBusy = false;
     sessionTeardownInProgress = false;
     showStreaming();
     resumeGamepadInput();
     setHomeMessage("Streaming", false);
   } else if (message.state === "idle") {
+    launchCancellationRequested = false;
+    launchCancellationSent = false;
     closePeerConnection();
     currentSessionId = 0;
     showHome("applications");
@@ -834,6 +915,11 @@ function handleSessionStatus(message) {
     requestApplications();
   } else if (message.state === "error") {
     hostOperationBusy = false;
+    launchCancellationRequested = false;
+    launchCancellationSent = false;
+    if (!launchingScreen.hidden) {
+      showHome("applications");
+    }
     setHomeMessage(message.message || "Session failed", true);
     if (currentSessionId) {
       try {
@@ -847,6 +933,7 @@ function handleSessionStatus(message) {
       hostOperationBusy = false;
     }
     setHomeMessage("Session: " + readableState(message.state), false);
+    updateLaunchingScreen(message.state);
   }
   updatePlayAvailability();
   log("Session status: " + message.state);
@@ -899,9 +986,12 @@ function startSelectedSession() {
   }
   selectedSession = selectedSettings();
   sessionTeardownInProgress = false;
+  launchCancellationRequested = false;
+  launchCancellationSent = false;
   sessionState = "starting";
   updatePlayAvailability();
   updateStreamOverlay();
+  showLaunching();
   try {
     sendGatewayMessage({
       type: "start-session",
@@ -1158,6 +1248,7 @@ function showOverlayTemporarily() {
 
 function showStreaming() {
   homeScreen.hidden = true;
+  launchingScreen.hidden = true;
   streamingScreen.hidden = false;
   videoElement.hidden = false;
   updateStreamOverlay();
@@ -1167,6 +1258,7 @@ function showStreaming() {
 
 function showHome(view) {
   homeScreen.hidden = false;
+  launchingScreen.hidden = true;
   streamingScreen.hidden = true;
   streamMenu.hidden = true;
   diagnosticsElement.hidden = true;
@@ -1690,6 +1782,9 @@ function exitApplication() {
 }
 
 function gamepadUiRoute() {
+  if (!launchingScreen.hidden) {
+    return "ui";
+  }
   if (streamingScreen.hidden) {
     return "ui";
   }
@@ -1755,6 +1850,9 @@ function isGameplayInputActive() {
 }
 
 function navigateUi(direction) {
+  if (!launchingScreen.hidden) {
+    return false;
+  }
   if (gatewayEditorIsOpen()) {
     return navigateGatewayEditor(direction);
   }
@@ -1804,6 +1902,9 @@ function navigateUi(direction) {
 }
 
 function activateFocusedControl() {
+  if (!launchingScreen.hidden) {
+    return false;
+  }
   const active = document.activeElement;
   if (gatewayEditorIsOpen()) {
     if (active === gatewayEditorCancelButton) {
@@ -1893,6 +1994,9 @@ function goBackFromUiInput() {
     return true;
   }
   if (closeSettingsSelector()) {
+    return true;
+  }
+  if (cancelLaunchingSession()) {
     return true;
   }
   if (!streamingScreen.hidden) {
