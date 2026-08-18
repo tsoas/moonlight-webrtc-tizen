@@ -111,8 +111,7 @@ try {
     Set-ServiceDataAcl -Path $machineDataDirectory
 
     $binaryPath = '"{0}" --service --source=moonlight' -f $executable
-    $configureCommand = 'sc.exe config "{0}" binPath= "{1}" obj= "NT AUTHORITY\LocalService" password= "" start= auto' -f $serviceName, $binaryPath
-    & cmd.exe /d /c $configureCommand
+    & sc.exe config $serviceName "binPath= $binaryPath" 'obj= NT AUTHORITY\LocalService' 'start= auto'
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to configure $serviceName to run as LocalService"
     }
