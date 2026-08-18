@@ -156,11 +156,11 @@ begin
     ewWaitUntilTerminated, ResultCode);
   Parameters := 'advfirewall firewall add rule name="' + FirewallRuleName +
     '" dir=in action=allow program="' + ExpandConstant('{app}\moonlight_webrtc.exe') +
-    '" enable=yes profile=private';
+    '" enable=yes profile=all remoteip=localsubnet';
   Result := Exec(ExpandConstant('{sys}\netsh.exe'), Parameters, '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
   if not Result then
-    Log('Unable to create the private-profile Moonlight WebRTC firewall rule. Exit code: ' + IntToStr(ResultCode));
+    Log('Unable to create the all-profile, LocalSubnet-restricted Moonlight WebRTC firewall rule. Exit code: ' + IntToStr(ResultCode));
 end;
 
 function ConfigureTrayAutostart(): Boolean;
