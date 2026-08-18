@@ -8,3 +8,4 @@ tizen/Debug/
 tizen/tizen_web_project.yaml
 /.tizen-install/
 /tizen/Release/
+/dist/
