@@ -38,7 +38,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $submoduleDirectory '.git'))) {
 }
 
 $projectCommit = (Invoke-Git -WorkingDirectory $repositoryRoot -Arguments @('rev-parse', 'HEAD')).Trim()
-$treeEntry = (Invoke-Git -WorkingDirectory $repositoryRoot -Arguments @('ls-tree', 'HEAD', '--', $submodulePath))
+$treeEntry = @(Invoke-Git -WorkingDirectory $repositoryRoot -Arguments @('ls-tree', 'HEAD', '--', $submodulePath))
 if ($treeEntry.Count -ne 1 -or $treeEntry[0] -notmatch '^160000 commit ([0-9a-f]{40})\s+') {
     throw 'The current project commit does not contain a pinned moonlight-common-c submodule.'
 }
