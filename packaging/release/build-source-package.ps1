@@ -104,7 +104,7 @@ try {
     if (Test-Path -LiteralPath $artifact) {
         Remove-Item -LiteralPath $artifact -Force
     }
-    & $tar.Source -czf $artifact --format=ustar --uid 0 --gid 0 --numeric-owner --mtime '1970-01-01 00:00:00Z' -C $stageDirectory $archiveRoot
+    & $tar.Source -czf $artifact --options 'gzip:!timestamp' --format=ustar --uid 0 --gid 0 --numeric-owner --mtime '1970-01-01 00:00:00Z' -C $stageDirectory $archiveRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Creating the source archive failed with exit code $LASTEXITCODE."
     }
