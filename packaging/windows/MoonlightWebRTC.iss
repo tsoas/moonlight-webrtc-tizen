@@ -61,21 +61,60 @@ var
 begin
   Result := Exec(PowerShellPath(), Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if (not Result) or (ResultCode <> 0) then begin
-    Log(FailureMessage + ' Exit code: ' + IntToStr(ResultCode));
+    Log(FailureMessage + ' PowerShell exit code: ' + IntToStr(ResultCode) +
+      '. Command: ' + Parameters);
     Result := False;
   end;
 end;
 
 function StopGatewayService(): Boolean;
 var
+  ResultCode: Integer;
   Script: String;
 begin
-  Script := '$service = Get-Service -Name ''' + ServiceName + ''' -ErrorAction SilentlyContinue; ' +
-    'if ($null -ne $service -and $service.Status -ne ''Stopped'') { ' +
-    'Stop-Service -Name ''' + ServiceName + ''' -ErrorAction Stop; ' +
-    '$service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30)) }';
+  if not Exec(ExpandConstant('{sys}\sc.exe'), 'query ' + ServiceName, '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode) then begin
+    Log('Unable to invoke sc.exe query for ' + ServiceName + '.');
+    Result := False;
+    exit;
+  end;
+  Log('sc.exe query ' + ServiceName + ' exit code: ' + IntToStr(ResultCode));
+  if ResultCode = 1060 then begin
+    Log(ServiceName + ' is not installed; no service stop is required.');
+    Result := True;
+    exit;
+  end;
+  if ResultCode <> 0 then begin
+    Log('Unable to query ' + ServiceName + '. sc.exe exit code: ' + IntToStr(ResultCode));
+    Result := False;
+    exit;
+  end;
+
+  if not Exec(ExpandConstant('{sys}\sc.exe'), 'stop ' + ServiceName, '', SW_HIDE,
+      ewWaitUntilTerminated, ResultCode) then begin
+    Log('Unable to invoke sc.exe stop for ' + ServiceName + '.');
+    Result := False;
+    exit;
+  end;
+  Log('sc.exe stop ' + ServiceName + ' exit code: ' + IntToStr(ResultCode));
+  if ResultCode = 1062 then begin
+    Log(ServiceName + ' is already stopped.');
+    Result := True;
+    exit;
+  end;
+  if (ResultCode <> 0) and (ResultCode <> 1061) then begin
+    Log('Unable to stop ' + ServiceName + '. sc.exe exit code: ' + IntToStr(ResultCode));
+    Result := False;
+    exit;
+  end;
+
+  Script := 'try { $service = Get-Service -Name ''' + ServiceName + ''' -ErrorAction Stop } ' +
+    'catch [System.InvalidOperationException] { exit 0 }; ' +
+    'if ($service.Status -ne ''Stopped'') { ' +
+    '$service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30)) }; ' +
+    'if ($service.Status -ne ''Stopped'') { Write-Error ''Service did not reach Stopped within 30 seconds.''; exit 1 }; exit 0';
   Result := RunPowerShell('-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"',
-    'Unable to stop the Moonlight WebRTC Gateway service.');
+    'Unable to wait for the Moonlight WebRTC Gateway service to stop.');
 end;
 
 procedure StopTrayForOriginalUser();
