@@ -110,10 +110,19 @@ try {
     }
     Set-ServiceDataAcl -Path $machineDataDirectory
 
-    $binaryPath = '"{0}" --service --source=moonlight' -f $executable
-    & sc.exe config $serviceName "binPath= $binaryPath" 'obj= NT AUTHORITY\LocalService' 'start= auto'
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to configure $serviceName to run as LocalService"
+    $serviceCommand = '"{0}" --service --source=moonlight' -f $executable
+    $serviceInstance = Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'"
+    if (-not $serviceInstance) {
+        throw "Unable to find $serviceName for LocalService configuration"
+    }
+    $changeResult = Invoke-CimMethod -InputObject $serviceInstance -MethodName Change -Arguments @{
+        PathName = $serviceCommand
+        StartMode = 'Automatic'
+        StartName = 'NT AUTHORITY\LocalService'
+        StartPassword = ''
+    }
+    if ($changeResult.ReturnValue -ne 0) {
+        throw "Unable to configure $serviceName to run as LocalService. Win32_Service.Change ReturnValue: $($changeResult.ReturnValue)"
     }
 } catch {
     if ($createdService) {
