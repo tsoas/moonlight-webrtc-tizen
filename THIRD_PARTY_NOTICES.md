@@ -15,6 +15,24 @@ archive identifies the exact project and `moonlight-common-c` commits, and
 includes the full checked-out `moonlight-common-c` source tree, this notice,
 and the GPL-3.0 licence text.
 
+## BrightCraft / Moonlight Tizen
+
+Parts of the Tizen-side implementation of Moonlight WebRTC were reused or
+adapted from the open-source
+[BrightCraft Moonlight Tizen](https://github.com/brightcraft/moonlight-tizen)
+project and from implementation ideas developed by that project.
+
+BrightCraft's Moonlight Tizen project is distributed under GPL-3.0.
+Moonlight WebRTC is also distributed under GPL-3.0, and the corresponding
+Moonlight WebRTC source is included with each release source package.
+
+We are grateful to BrightCraft and the wider Moonlight Tizen community for
+their work on bringing Moonlight game streaming to Samsung televisions and
+for the implementation experience that helped inform this project.
+
+Any original copyright and licence notices present in reused or adapted source
+files must remain intact.
+
 ## Windows runtime inventory
 
 The current installer stages the following dynamic runtime libraries:
