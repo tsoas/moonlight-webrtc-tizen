@@ -27,7 +27,7 @@ assert.strictEqual(testing.nextNavigationZone("top", "down", true), "content",
   "DOWN from the top application bar must return to content");
 assert.strictEqual(testing.nextNavigationZone("content", "up", false), "content",
   "navigation must not invent a missing top-bar focus target");
-assert.strictEqual(testing.readableGatewayAddress("ws://10.0.0.4:8000"), "10.0.0.4",
+assert.strictEqual(testing.readableGatewayAddress("ws://198.51.100.4:8000"), "198.51.100.4",
   "the gateway address should be derived from the real signaling URL");
 assert.strictEqual(testing.readableGatewayAddress("not a URL"), "-",
   "invalid gateway URLs must not fabricate an address");
