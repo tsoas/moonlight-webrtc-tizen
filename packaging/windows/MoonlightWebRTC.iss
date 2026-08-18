@@ -126,6 +126,15 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+procedure StopTrayForUninstall();
+var
+  ResultCode: Integer;
+begin
+  { A missing tray process returns a nonzero taskkill code and is harmless. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im moonlight_webrtc_tray.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 function ConfigureService(): Boolean;
 var
   Parameters: String;
@@ -186,6 +195,16 @@ begin
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+procedure RemoveTrayAutostartForUninstall();
+var
+  ResultCode: Integer;
+begin
+  { A missing entry returns a nonzero reg.exe code and is harmless. }
+  Exec(ExpandConstant('{sys}\reg.exe'),
+    'delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "Moonlight WebRTC" /f', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 function StartGatewayService(): Boolean;
 var
   Script: String;
@@ -236,12 +255,12 @@ var
   ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then begin
-    StopTrayForOriginalUser();
+    StopTrayForUninstall();
     if not StopGatewayService() then begin
       MsgBox('Moonlight WebRTC Gateway could not be stopped. The uninstaller cannot safely continue.', mbError, MB_OK);
       Abort;
     end;
-    RemoveTrayAutostart();
+    RemoveTrayAutostartForUninstall();
     Exec(ExpandConstant('{sys}\sc.exe'), 'delete ' + ServiceName, '', SW_HIDE,
       ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\netsh.exe'),
