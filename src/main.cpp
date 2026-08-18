@@ -27,6 +27,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -34,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -1996,9 +1998,14 @@ public:
     {
         if (options.hostMode == ProgramHostMode::Service) {
             const auto logPath = *options.dataDirectory / "gateway-service.log";
-            file_.open(logPath, std::ios::out | std::ios::app);
+            const bool writeUtf8Bom = ensureUtf8LogEncoding(logPath);
+            file_.open(logPath, std::ios::binary | std::ios::out | std::ios::app);
             if (!file_) {
                 throw std::runtime_error("Unable to open service log: " + logPath.string());
+            }
+            if (writeUtf8Bom) {
+                file_.write("\xEF\xBB\xBF", 3);
+                file_.flush();
             }
         }
     }
@@ -2016,6 +2023,45 @@ public:
     }
 
 private:
+    static bool ensureUtf8LogEncoding(const std::filesystem::path& path)
+    {
+        std::error_code error;
+        if (!std::filesystem::exists(path, error)) {
+            if (error) {
+                throw std::runtime_error("Unable to inspect service log: " + path.string());
+            }
+            return true;
+        }
+
+        const auto size = std::filesystem::file_size(path, error);
+        if (error) {
+            throw std::runtime_error("Unable to inspect service log: " + path.string());
+        }
+        if (size == 0) {
+            return true;
+        }
+
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("Unable to read service log: " + path.string());
+        }
+        const std::string contents(std::istreambuf_iterator<char>(input), {});
+        if (contents.starts_with("\xEF\xBB\xBF")) {
+            return false;
+        }
+
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw std::runtime_error("Unable to update service log encoding: " + path.string());
+        }
+        output.write("\xEF\xBB\xBF", 3);
+        output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        if (!output) {
+            throw std::runtime_error("Unable to update service log encoding: " + path.string());
+        }
+        return false;
+    }
+
     bool console_ = false;
     std::ofstream file_;
     std::mutex mutex_;
