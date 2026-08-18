@@ -5,21 +5,15 @@ and `build-vcpkg-release/vcpkg_installed/vcpkg/info`. The listed versions are
 the versions used to build the current beta artifacts, not a promise for later
 releases.
 
-## Important release blocker
+## GPL-3.0 source availability
 
-Moonlight WebRTC includes `third_party/moonlight-common-c`, whose included
-licence is GNU GPL version 3. The repository does **not** currently declare a
-top-level licence for Moonlight WebRTC itself. A maintainer must establish an
-appropriate compatible project licence and complete GPL distribution
-requirements before public distribution. In particular, an executable-form
-distribution must provide the corresponding source and the required GPL notice
-and licence information. This notice does not select a licence or provide a
-legal conclusion.
-
-The current Windows installer does not yet package this notice document as a
-separate installed file. That distribution step must be resolved as part of
-the licence-compliance work; it is intentionally outside this documentation
-and release-preparation-only milestone.
+Moonlight WebRTC is licensed under GPL-3.0; the full licence text is at
+[LICENSE](LICENSE). It incorporates `third_party/moonlight-common-c`, which is
+also GPL-3.0. Each beta release must publish the corresponding
+`MoonlightWebRTC-Source.tar.gz` alongside the executable artifacts. That source
+archive identifies the exact project and `moonlight-common-c` commits, and
+includes the full checked-out `moonlight-common-c` source tree, this notice,
+and the GPL-3.0 licence text.
 
 ## Windows runtime inventory
 
@@ -56,13 +50,8 @@ The Samsung Tizen WGT contains the project's HTML, JavaScript, CSS, assets,
 and normal package-signature metadata; it does not bundle the above Windows
 runtime DLLs.
 
-## Required follow-up before public distribution
+## Release maintenance
 
-1. Declare a compatible licence for Moonlight WebRTC at repository root.
-2. Confirm the corresponding-source offer/delivery mechanism for the GPL-3.0
-   component and the combined work.
-3. Include the applicable licence texts and notices with each executable
-   distribution, including the Windows installer payload or an equivalent
-   accompanying distribution.
-4. Re-audit the list whenever the vcpkg baseline, staged DLLs, or submodule
-   revision changes.
+Publish `LICENSE`, this notice, and `MoonlightWebRTC-Source.tar.gz` with the
+beta release. Re-audit this list whenever the vcpkg baseline, staged DLLs, or
+submodule revision changes.

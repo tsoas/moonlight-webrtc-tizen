@@ -19,6 +19,10 @@ $assets = @(
     [pscustomobject]@{
         Name = 'MoonlightWebRTC.wgt'
         Path = Join-Path $DistributionDirectory 'tizen\MoonlightWebRTC.wgt'
+    },
+    [pscustomobject]@{
+        Name = 'MoonlightWebRTC-Source.tar.gz'
+        Path = Join-Path $DistributionDirectory 'MoonlightWebRTC-Source.tar.gz'
     }
 )
 

@@ -1,8 +1,6 @@
 # Moonlight WebRTC
 
-> **Beta release preparation note:** the repository's project licence has not
-> yet been declared. See [Licensing status](#licensing-status) before publicly
-> redistributing a beta build.
+Moonlight WebRTC is licensed under the [GNU General Public License version 3](LICENSE).
 
 Moonlight WebRTC streams games from a Sunshine host PC to a Samsung Tizen TV.
 The TV connects only to the local Moonlight WebRTC Gateway; it never connects
@@ -126,11 +124,8 @@ regenerate that file from a completed local build with:
 powershell -ExecutionPolicy Bypass -File packaging\release\generate-checksums.ps1
 ```
 
-## Licensing status
+## Licence
 
-This repository currently has no top-level project licence. It also incorporates
-the GPL-3.0-licensed `moonlight-common-c` component. A project licence and a
-corresponding distribution-compliance review are required before this project
-can be publicly released. This README does not select a licence. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the audited dependency
-inventory and notice obligations.
+Moonlight WebRTC is licensed under the [GNU General Public License version
+3](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the
+audited dependency inventory and release notices.
