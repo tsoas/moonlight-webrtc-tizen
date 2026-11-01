@@ -454,6 +454,11 @@ int main()
         runningStatus.runningAppId = "7";
         require(gateway::protocol::makeGatewayStatus(runningStatus).at("runningAppId") == "7",
                 "Gateway status must expose the current Sunshine application");
+        require(!gateway::protocol::makeGatewayStatus(runningStatus).contains("macAddress"),
+                "Gateway status must omit an unknown Wake-on-LAN address");
+        runningStatus.macAddress = "00:1A:2B:3C:4D:5E";
+        require(gateway::protocol::makeGatewayStatus(runningStatus).at("macAddress") == "00:1A:2B:3C:4D:5E",
+                "Gateway status must expose its Wake-on-LAN address");
 
         std::cout << "Gateway protocol tests passed\n";
         return 0;

@@ -5,6 +5,16 @@
 
 namespace gateway::moonlight {
 
+// Sunshine derives its whole port map from a configurable base port, so a host that
+// moved off the default is only reachable once the Gateway probes the matching port.
+inline constexpr std::uint16_t DefaultSunshineHttpPort = 47989;
+inline constexpr std::uint16_t DefaultSunshineHttpsPortOffset = 5;
+
+struct SunshineEndpoint {
+    std::string host;
+    std::uint16_t httpPort = DefaultSunshineHttpPort;
+};
+
 struct SunshineServerInfo {
     std::string hostname;
     std::string appVersion;
@@ -30,6 +40,7 @@ struct PairedSunshineHost {
     std::string lastAddress;
     std::uint16_t httpsPort = 0;
     std::string serverCertificatePem;
+    std::uint16_t httpPort = DefaultSunshineHttpPort;
 };
 
 } // namespace gateway::moonlight

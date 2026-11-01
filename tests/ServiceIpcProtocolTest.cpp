@@ -43,7 +43,8 @@ int main()
         gateway::serviceipc::StatusSnapshot snapshot;
         snapshot.sunshineConnected = true;
         snapshot.sunshinePaired = true;
-        snapshot.sunshineHost = "Sunshine-PC";
+        snapshot.sunshineHost = "192.168.1.20:27786";
+        snapshot.sunshineName = "Sunshine-PC";
         snapshot.runningApplicationId = "7";
         snapshot.runningApplicationName = "Desktop";
         snapshot.sessionActive = true;
@@ -54,7 +55,8 @@ int main()
                     && response.at("type") == "status"
                     && response.at("serviceRunning") == true
                     && response.at("sunshinePaired") == true
-                    && response.at("sunshineHost") == "Sunshine-PC"
+                    && response.at("sunshineHost") == "192.168.1.20:27786"
+                    && response.at("sunshineName") == "Sunshine-PC"
                     && response.at("runningApplicationId") == "7"
                     && response.at("runningApplicationName") == "Desktop"
                     && response.at("connectedTvClients") == 1,
@@ -62,7 +64,8 @@ int main()
 
         const auto minimal = nlohmann::json::parse(
             gateway::serviceipc::makeStatusResponse({}));
-        require(!minimal.contains("sunshineHost") && !minimal.contains("runningApplicationId"),
+        require(!minimal.contains("sunshineHost") && !minimal.contains("sunshineName")
+                    && !minimal.contains("runningApplicationId"),
                 "IPC status response invented unavailable values");
 
         const auto error = nlohmann::json::parse(

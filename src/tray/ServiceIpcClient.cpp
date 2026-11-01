@@ -80,6 +80,7 @@ serviceipc::StatusSnapshot requestServiceStatus()
     if (message.contains("sunshineConnected")) snapshot.sunshineConnected = message.at("sunshineConnected").get<bool>();
     if (message.contains("sunshinePaired")) snapshot.sunshinePaired = message.at("sunshinePaired").get<bool>();
     if (message.contains("sunshineHost")) snapshot.sunshineHost = message.at("sunshineHost").get<std::string>();
+    if (message.contains("sunshineName")) snapshot.sunshineName = message.at("sunshineName").get<std::string>();
     if (message.contains("runningApplicationId")) snapshot.runningApplicationId = message.at("runningApplicationId").get<std::string>();
     if (message.contains("runningApplicationName")) snapshot.runningApplicationName = message.at("runningApplicationName").get<std::string>();
     if (message.contains("sessionActive")) snapshot.sessionActive = message.at("sessionActive").get<bool>();

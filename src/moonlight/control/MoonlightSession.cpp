@@ -66,7 +66,7 @@ std::vector<std::string> localIpv4Addresses()
 std::unique_ptr<SunshineHttpClient> configuredClient(const MoonlightIdentity& identity,
                                                       const DetectedSunshine& detected)
 {
-    auto client = std::make_unique<SunshineHttpClient>(identity, detected.address);
+    auto client = std::make_unique<SunshineHttpClient>(identity, detected.address, detected.httpPort);
     client->setHttpsPort(detected.serverInfo.httpsPort);
     if (detected.pairedHost) {
         client->setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
@@ -153,7 +153,11 @@ DetectedSunshine MoonlightSession::detectSunshine(
     std::string lastError;
     for (const auto& candidate : candidates) {
         try {
-            SunshineHttpClient client(identity, candidate);
+            const auto endpoint = MoonlightIdentity::parseSunshineEndpoint(candidate);
+            if (!endpoint) {
+                throw std::runtime_error("not a valid host or host:port address");
+            }
+            SunshineHttpClient client(identity, endpoint->host, endpoint->httpPort);
             auto serverInfo = client.getServerInfo(false, DetectionTimeout);
             if (!serverInfo.state.starts_with("SUNSHINE_")) {
                 throw std::runtime_error("server did not identify itself as Sunshine");
@@ -183,7 +187,7 @@ DetectedSunshine MoonlightSession::detectSunshine(
                 logger("Sunshine app version: " + serverInfo.appVersion);
                 logger("Sunshine state: " + serverInfo.state);
             }
-            return {candidate, std::move(serverInfo), std::move(pairedHost)};
+            return {endpoint->host, endpoint->httpPort, std::move(serverInfo), std::move(pairedHost)};
         } catch (const std::exception& error) {
             lastError = candidate + ": " + error.what();
             if (requestedHost

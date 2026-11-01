@@ -29,7 +29,10 @@ struct MoonlightSessionOptions {
 };
 
 struct DetectedSunshine {
+    // The address is the bare host. The port travels separately so every client built
+    // from a detection result keeps talking to the port the probe actually answered on.
     std::string address;
+    std::uint16_t httpPort = DefaultSunshineHttpPort;
     SunshineServerInfo serverInfo;
     std::optional<PairedSunshineHost> pairedHost;
 };

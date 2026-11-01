@@ -350,11 +350,12 @@ int main()
                 "Persistent Moonlight identity was regenerated during reload");
 
         gateway::moonlight::PairedSunshineHost savedHost{
-            "host-id", "Sunshine-PC", "127.0.0.1", 47984, firstCertificate};
+            "host-id", "Sunshine-PC", "127.0.0.1", 27781, firstCertificate, 27786};
         firstIdentity.savePairedHost(savedHost);
         const auto loadedHost = reloadedIdentity.pairedHost("host-id");
         require(loadedHost && loadedHost->serverCertificatePem == firstCertificate
-                    && loadedHost->lastAddress == "127.0.0.1",
+                    && loadedHost->lastAddress == "127.0.0.1"
+                    && loadedHost->httpsPort == 27781 && loadedHost->httpPort == 27786,
                 "Paired Sunshine host persistence failed");
         firstIdentity.saveConfiguredSunshineHost("sunshine.local");
         require(gateway::moonlight::MoonlightIdentity(firstDirectory.path()).configuredSunshineHost()
@@ -362,9 +363,30 @@ int main()
                     && gateway::moonlight::MoonlightIdentity::isValidSunshineHost("192.168.1.20")
                     && !gateway::moonlight::MoonlightIdentity::isValidSunshineHost("https://sunshine"),
                 "Configured Sunshine host persistence or validation failed");
+        firstIdentity.saveConfiguredSunshineHost("sunshine.local:27786");
+        require(gateway::moonlight::MoonlightIdentity(firstDirectory.path()).configuredSunshineHost()
+                    == "sunshine.local:27786",
+                "Configured Sunshine host did not preserve a custom port");
+
+        using gateway::moonlight::MoonlightIdentity;
+        const auto bare = MoonlightIdentity::parseSunshineEndpoint("192.168.1.20");
+        const auto withPort = MoonlightIdentity::parseSunshineEndpoint("192.168.1.20:27786");
+        require(bare && bare->host == "192.168.1.20"
+                    && bare->httpPort == gateway::moonlight::DefaultSunshineHttpPort
+                    && withPort && withPort->host == "192.168.1.20" && withPort->httpPort == 27786,
+                "Sunshine endpoint parsing dropped the host or port");
+        require(!MoonlightIdentity::isValidSunshineEndpoint("sunshine:0")
+                    && !MoonlightIdentity::isValidSunshineEndpoint("sunshine:65536")
+                    && !MoonlightIdentity::isValidSunshineEndpoint("sunshine:")
+                    && !MoonlightIdentity::isValidSunshineEndpoint("sunshine:47989x")
+                    && !MoonlightIdentity::isValidSunshineEndpoint("sunshine:47989:1")
+                    && !MoonlightIdentity::isValidSunshineEndpoint("https://sunshine:47989"),
+                "Sunshine endpoint validation accepted a malformed port");
+
         bool invalidConfiguredHostRejected = false;
-        try { firstIdentity.saveConfiguredSunshineHost("sunshine:47990"); } catch (const std::exception&) { invalidConfiguredHostRejected = true; }
-        require(invalidConfiguredHostRejected, "Configured Sunshine host accepted a URL port");
+        try { firstIdentity.saveConfiguredSunshineHost("https://sunshine:47990"); } catch (const std::exception&) { invalidConfiguredHostRejected = true; }
+        require(invalidConfiguredHostRejected, "Configured Sunshine host accepted a URL");
+        firstIdentity.saveConfiguredSunshineHost("sunshine.local");
         const std::string preservedIdentity = firstIdentity.uniqueId();
         require(firstIdentity.removePairedHost("host-id")
                     && !gateway::moonlight::MoonlightIdentity(firstDirectory.path()).pairedHost("host-id")
@@ -453,6 +475,42 @@ int main()
         }
         require(invalidMigrationRejected && !std::filesystem::exists(invalidDestination),
                 "Failed migration created an unexpected conflicting identity");
+
+        TemporaryDirectory residueRoot;
+        const auto residueDirectory = residueRoot.path() / "program-data";
+        std::filesystem::create_directories(residueDirectory);
+        {
+            std::ofstream staleLog(residueDirectory / "gateway-service.log");
+            staleLog << "stale\n";
+            std::ofstream staleHost(residueDirectory / "sunshine-host.txt");
+            staleHost << "TVSalon\n";
+        }
+        require(gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                    residueDirectory, residueDirectory)
+                    == gateway::moonlight::MoonlightIdentityMigrationResult::DestinationAuthoritative,
+                "Identity-less residue blocked service configuration");
+        require(!std::filesystem::exists(residueDirectory / "gateway-service.log")
+                    && !std::filesystem::exists(residueDirectory / "sunshine-host.txt")
+                    && !gateway::moonlight::MoonlightIdentity(residueDirectory).uniqueId().empty(),
+                "Stale residue was not cleared for a fresh identity");
+
+        TemporaryDirectory populatedRoot;
+        const auto populatedDirectory = populatedRoot.path() / "program-data";
+        std::filesystem::create_directories(populatedDirectory);
+        {
+            std::ofstream settings(populatedDirectory / "gateway-settings.json");
+            settings << "{\"preserved\":true}\n";
+        }
+        bool populatedDestinationRejected = false;
+        try {
+            gateway::moonlight::MoonlightIdentity::migrateStorageDirectory(
+                legacyDirectory, populatedDirectory);
+        } catch (const std::exception&) {
+            populatedDestinationRejected = true;
+        }
+        require(populatedDestinationRejected
+                    && std::filesystem::exists(populatedDirectory / "gateway-settings.json"),
+                "Unrecognized destination data was discarded instead of refused");
 
         TemporaryDirectory freshRoot;
         const auto freshProgramDataDirectory = freshRoot.path() / "program-data";

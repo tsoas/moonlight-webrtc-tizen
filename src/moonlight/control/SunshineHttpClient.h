@@ -37,9 +37,10 @@ public:
 
     SunshineHttpClient(const MoonlightIdentity& identity,
                        std::string host,
-                       std::uint16_t httpPort = 47989);
+                       std::uint16_t httpPort = DefaultSunshineHttpPort);
 
     const std::string& host() const;
+    std::uint16_t httpPort() const;
     std::uint16_t httpsPort() const;
     const std::string& pinnedServerCertificate() const;
 

@@ -2,6 +2,12 @@
   "use strict";
 
   const POLL_INTERVAL_MS = 1000 / 60;
+  // While the stream owns the controller this poller dispatches nothing; it only keeps
+  // held-button state fresh so returning to a menu does not fire a stale edge. Backing
+  // off eases the pressure on video decode, but only a little: this is also the interval
+  // the first press after leaving gameplay waits for, and a quarter of a second of that
+  // reads as a frozen menu.
+  const GAMEPLAY_POLL_INTERVAL_MS = 50;
   const INITIAL_REPEAT_DELAY_MS = 350;
   const REPEAT_INTERVAL_MS = 120;
   const STICK_THRESHOLD = 0.55;
@@ -48,31 +54,45 @@
     this.states.clear();
   };
 
-  GamepadUiNavigation.prototype.schedule = function () {
+  GamepadUiNavigation.prototype.schedule = function (route) {
     const navigation = this;
-    this.timer = setTimeout(function () { navigation.poll(); }, POLL_INTERVAL_MS);
+    const interval = route === "gameplay" ? GAMEPLAY_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+    this.timer = setTimeout(function () { navigation.poll(); }, interval);
   };
 
   GamepadUiNavigation.prototype.poll = function () {
     this.timer = null;
-    if (!document.hidden) {
-      const gamepads = currentGamepads();
-      const seen = new Set();
-      for (let index = 0; index < gamepads.length; index += 1) {
-        const gamepad = gamepads[index];
-        if (!gamepad) { continue; }
-        seen.add(gamepad.index);
-        this.handleGamepad(gamepad, performance.now());
+    let route = null;
+    // navigate/activate/back run application code. If one of them throws, the poller has
+    // to keep its own timer alive anyway; otherwise a single bad transition leaves the
+    // controller permanently unable to drive the interface.
+    try {
+      if (!document.hidden) {
+        // Read once per poll rather than once per controller.
+        route = this.options.route();
+        const gamepads = currentGamepads();
+        const seen = new Set();
+        for (let index = 0; index < gamepads.length; index += 1) {
+          const gamepad = gamepads[index];
+          if (!gamepad) { continue; }
+          seen.add(gamepad.index);
+          this.handleGamepad(gamepad, performance.now(), route);
+        }
+        this.states.forEach(function (_state, index) {
+          if (!seen.has(index)) { this.states.delete(index); }
+        }, this);
       }
-      this.states.forEach(function (_state, index) {
-        if (!seen.has(index)) { this.states.delete(index); }
-      }, this);
+    } catch (error) {
+      if (typeof this.options.log === "function") {
+        this.options.log("Gamepad UI navigation poll failed: " + String(error));
+      }
+    } finally {
+      this.schedule(route);
     }
-    this.schedule();
   };
 
-  GamepadUiNavigation.prototype.handleGamepad = function (gamepad, now) {
-    const route = this.options.route();
+  GamepadUiNavigation.prototype.handleGamepad = function (gamepad, now, currentRoute) {
+    const route = typeof currentRoute === "string" ? currentRoute : this.options.route();
     let state = this.states.get(gamepad.index);
     if (!state) {
       state = {

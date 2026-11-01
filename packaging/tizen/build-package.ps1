@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$TizenCli = 'C:\tizen-studio\tools\ide\bin\tizen.bat',
-    [string]$SigningProfile
+    [string]$SigningProfile,
+    # Samsung's Emscripten SDK, required for the Wake-on-LAN module; see build-wake-on-lan.ps1.
+    [string]$EmsdkRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +39,8 @@ try {
         'app.js',
         'application-artwork.js',
         'config.xml',
+        'durable-storage.js',
+        'frame-interpolation.js',
         'gamepad-input.js',
         'gamepad-ui-navigation.js',
         'gateway-ipv4.js',
@@ -45,12 +49,14 @@ try {
         'preferences.js',
         'tizen_web_project.yaml',
         'ui.css',
-        'ui.js'
+        'ui.js',
+        'wake-on-lan.js'
     )
     foreach ($runtimeFile in $runtimeFiles) {
         Copy-Item -LiteralPath (Join-Path $projectDirectory $runtimeFile) -Destination $sourceDirectory
     }
     Copy-Item -LiteralPath (Join-Path $projectDirectory 'assets') -Destination $sourceDirectory -Recurse
+    & (Join-Path $PSScriptRoot 'build-wake-on-lan.ps1') -OutputDirectory (Join-Path $sourceDirectory 'wasm') -EmsdkRoot $EmsdkRoot
 
     & $TizenCli build-web --output $buildDirectory -- $sourceDirectory
     if ($LASTEXITCODE -ne 0) {

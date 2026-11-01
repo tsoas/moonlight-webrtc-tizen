@@ -73,6 +73,8 @@ struct GatewayStatus {
     bool sunshinePaired = false;
     bool sessionActive = false;
     std::optional<std::string> runningAppId;
+    // The Gateway adapter the TV reaches it through, so the TV can wake this PC later.
+    std::optional<std::string> macAddress;
 };
 
 struct Application {

@@ -44,6 +44,9 @@ std::string makeStatusResponse(const StatusSnapshot& snapshot)
     if (snapshot.sunshineHost) {
         response["sunshineHost"] = *snapshot.sunshineHost;
     }
+    if (snapshot.sunshineName) {
+        response["sunshineName"] = *snapshot.sunshineName;
+    }
     if (snapshot.runningApplicationId) {
         response["runningApplicationId"] = *snapshot.runningApplicationId;
     }

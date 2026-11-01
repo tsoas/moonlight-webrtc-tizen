@@ -2,8 +2,24 @@ const GATEWAY_PROTOCOL_VERSION = 1;
 const GAMEPAD_PROTOCOL_VERSION = 1;
 const GAMEPAD_POLL_INTERVAL_MS = 1000 / 120;
 const GAMEPAD_KEEPALIVE_INTERVAL_MS = 250;
-const preferences = ClientPreferences.create();
-const gatewayStore = GatewayStore.create();
+// Every persistent value goes through one storage object so that a TV which loses
+// localStorage writes on exit loses none of them rather than an arbitrary subset.
+const durableStorage = DurableStorage.create({
+  log: function (message) { log(message); },
+});
+const preferences = ClientPreferences.create(durableStorage);
+const gatewayStore = GatewayStore.create(durableStorage);
+const wakeOnLan = WakeOnLan.create({ log: function (message) { log(message); } });
+// How long a woken PC may take to boot and start the Gateway service before the TV gives up.
+const GATEWAY_WAKE_TIMEOUT_MS = 120000;
+// A sleeping PC never answers the TCP handshake, and the retransmissions back off to a minute
+// or more, so each attempt is cut short to reconnect promptly once the PC is up.
+const GATEWAY_WAKE_ATTEMPT_TIMEOUT_MS = 5000;
+// The resolution list is not static in the client: it is whatever the Gateway advertises,
+// and until the first "capabilities" message arrives the markup only offers 720p and 1080p.
+// Caching the last list means the modes the Gateway actually supports - 1440p and 4K
+// included - are on screen from the moment the app opens, not once it has connected.
+const CAPABILITIES_STORAGE_KEY = "moonlight-webrtc.client.capabilities.v1";
 
 const homeScreen = document.getElementById("home-screen");
 const streamingScreen = document.getElementById("streaming-screen");
@@ -25,6 +41,9 @@ const resolutionSelect = document.getElementById("resolution-select");
 const codecSelect = document.getElementById("codec-select");
 const hdrSelect = document.getElementById("hdr-select");
 const bitrateSelect = document.getElementById("bitrate-select");
+const interpolationSelect = document.getElementById("interpolation-select");
+const interpolationStatusElement = document.getElementById("interpolation-status");
+const interpolationCanvas = document.getElementById("interpolation-canvas");
 const settingsSelectorMenu = document.getElementById("settings-selector-menu");
 const settingsSelectorHeading = document.getElementById("settings-selector-heading");
 const settingsSelectorOptions = document.getElementById("settings-selector-options");
@@ -44,6 +63,7 @@ const gatewayEditorCancelButton = document.getElementById("gateway-editor-cancel
 const gatewayEditorConnectButton = document.getElementById("gateway-editor-connect");
 const gatewayContextMenu = document.getElementById("gateway-context-menu");
 const gatewayContextHeading = document.getElementById("gateway-context-heading");
+const gatewayWakeButton = document.getElementById("gateway-wake-button");
 const gatewayEditButton = document.getElementById("gateway-edit-button");
 const gatewayRemoveButton = document.getElementById("gateway-remove-button");
 const gatewayRemoveDialog = document.getElementById("gateway-remove-dialog");
@@ -70,6 +90,7 @@ const overlay = {
   hdr: document.getElementById("overlay-hdr"),
   gamepad: document.getElementById("overlay-gamepad"),
   connection: document.getElementById("overlay-connection"),
+  interpolation: document.getElementById("overlay-interpolation"),
 };
 
 const trackCounts = {
@@ -164,6 +185,9 @@ let videoModes = [];
 let codecSelectionWasIntentional = false;
 let updatingCodecOptions = false;
 let lastStatisticsConsoleTime = 0;
+let lastStatisticsSampleTime = 0;
+// Half the console-log period, so that log still lands on its own five-second schedule.
+const HIDDEN_STATISTICS_INTERVAL_MS = 2500;
 let applications = [];
 let ui = null;
 let artworkLoader = null;
@@ -182,6 +206,9 @@ let gatewayContextGatewayId = null;
 let gatewayRemoveGatewayId = null;
 let gatewayConnectionToken = 0;
 let openApplicationsAfterConnection = false;
+// The Gateway being woken: { gatewayId, name, timer }. Its connection attempts are expected
+// to fail until the PC has booted, so they are reported as waiting rather than as errors.
+let gatewayWake = null;
 const gatewayRuntimeStates = new Map();
 const gatewayProbeIds = new Set();
 
@@ -230,8 +257,27 @@ function gatewayWebSocketUrl(gateway) {
 
 function gatewayEntries() {
   return savedGateways.map(function (gateway) {
-    return Object.assign({}, gateway, { state: gatewayRuntimeStates.get(gateway.id) || "Offline" });
+    const state = gatewayRuntimeStates.get(gateway.id) || "Offline";
+    return Object.assign({}, gateway, {
+      state: gatewayWakeIsActive(gateway.id) && state !== "Online" ? "Waking" : state,
+    });
   });
+}
+
+// The status message carries the MAC address of the Gateway adapter this TV reaches it
+// through; keeping it is what allows the TV to wake that PC once it is off.
+function gatewayWithStatus(gateway, message) {
+  const macAddress = WakeOnLan.normalizeMacAddress(message && message.macAddress);
+  return macAddress ? Object.assign({}, gateway, { macAddress: macAddress }) : Object.assign({}, gateway);
+}
+
+function learnGatewayMacAddress(gatewayId, message) {
+  const stored = gatewayStore.find(gatewayId);
+  const updated = stored ? gatewayWithStatus(stored, message) : null;
+  if (updated && updated.macAddress !== stored.macAddress) {
+    gatewayStore.upsert(updated);
+    savedGateways = gatewayStore.list();
+  }
 }
 
 function renderGateways() {
@@ -269,12 +315,12 @@ function resetGatewayData() {
   }
 }
 
-function refreshStoredGatewayName(message) {
+function refreshStoredGateway(message) {
   if (!activeGateway) {
     return;
   }
   const name = gatewayDisplayName(message);
-  const updated = gatewayStore.upsert(Object.assign({}, activeGateway, { name: name }));
+  const updated = gatewayStore.upsert(gatewayWithStatus(Object.assign({}, activeGateway, { name: name }), message));
   if (updated) {
     activeGateway = updated;
     savedGateways = gatewayStore.list();
@@ -330,11 +376,11 @@ function completeGatewayValidation(message) {
     return;
   }
   if (!pendingGatewayValidation) {
-    refreshStoredGatewayName(message);
+    refreshStoredGateway(message);
     return;
   }
   const pending = pendingGatewayValidation;
-  const candidate = Object.assign({}, activeGateway, { name: gatewayDisplayName(message) });
+  const candidate = gatewayWithStatus(Object.assign({}, activeGateway, { name: gatewayDisplayName(message) }), message);
   const saved = pending.mode === "edit"
     ? gatewayStore.replace(pending.previousId, candidate)
     : gatewayStore.upsert(candidate);
@@ -412,7 +458,8 @@ function connectGateway(gateway) {
   setGatewayRuntimeState(activeGateway.id, "Connecting");
 
   gatewayStateElement.textContent = "Connecting";
-  setHomeMessage("Connecting to Gateway...", false);
+  setHomeMessage(gatewayWakeIsActive(activeGateway.id)
+    ? "Waiting for " + gatewayWake.name + " to wake up..." : "Connecting to Gateway...", false);
   try {
     socket = new WebSocket(gatewayWebSocketUrl(activeGateway));
   } catch (error) {
@@ -422,7 +469,18 @@ function connectGateway(gateway) {
     return;
   }
 
+  let wakeAttemptTimer = null;
+  if (gatewayWakeIsActive(activeGateway.id)) {
+    const attemptSocket = socket;
+    wakeAttemptTimer = setTimeout(function () {
+      if (attemptSocket.readyState === WebSocket.CONNECTING) {
+        attemptSocket.close();
+      }
+    }, GATEWAY_WAKE_ATTEMPT_TIMEOUT_MS);
+  }
+
   socket.addEventListener("open", function () {
+    clearTimeout(wakeAttemptTimer);
     if (token !== gatewayConnectionToken) {
       return;
     }
@@ -436,6 +494,7 @@ function connectGateway(gateway) {
   });
 
   socket.addEventListener("close", function () {
+    clearTimeout(wakeAttemptTimer);
     if (token !== gatewayConnectionToken) {
       return;
     }
@@ -447,6 +506,15 @@ function connectGateway(gateway) {
     sessionState = "idle";
     sessionStateElement.textContent = "Idle";
     closePeerConnection();
+    // A PC that is still booting refuses connections; retry quietly, leaving the user where
+    // they are rather than returning them to the Gateway list on every attempt.
+    if (activeGateway && gatewayWakeIsActive(activeGateway.id)) {
+      setGatewayRuntimeState(activeGateway.id, "Offline");
+      setHomeMessage("Waiting for " + gatewayWake.name + " to wake up...", false);
+      updatePlayAvailability();
+      reconnectTimer = setTimeout(function () { connectGateway(activeGateway); }, 2000);
+      return;
+    }
     showHome();
     if (gatewayValidationFailed("Unable to connect to Gateway at " + gatewayAddress())) {
       return;
@@ -504,6 +572,7 @@ function probeGateway(gateway) {
       try {
         const message = JSON.parse(event.data);
         if (message.version === GATEWAY_PROTOCOL_VERSION && message.type === "gateway-status") {
+          learnGatewayMacAddress(gateway.id, message);
           complete("Online");
         }
       } catch (error) {
@@ -575,6 +644,7 @@ function handleGatewayStatus(message) {
     setRunningApplication(message.runningAppId);
   }
   if (activeGateway) {
+    finishGatewayWake(activeGateway.id);
     setGatewayRuntimeState(activeGateway.id, "Online");
     completeGatewayValidation(message);
     if (ui) {
@@ -629,6 +699,7 @@ function currentPreferenceValues() {
     hdr: hdrSelect.value === "true",
     bitrateKbps: Number.isInteger(Number(bitrateSelect.value))
       ? Number(bitrateSelect.value) : null,
+    frameInterpolation: interpolationSelect.value === "true",
   };
 }
 
@@ -636,7 +707,40 @@ function persistCurrentPreferences() {
   savedPreferences = preferences.replace(currentPreferenceValues());
 }
 
+function cacheCapabilities(message) {
+  if (!Array.isArray(message.videoModes) || message.videoModes.length === 0) {
+    return;
+  }
+  try {
+    durableStorage.setItem(CAPABILITIES_STORAGE_KEY, JSON.stringify({
+      videoModes: message.videoModes,
+      bitratesKbps: message.bitratesKbps,
+    }));
+  } catch (error) {
+    log("Unable to cache Gateway capabilities: " + errorMessage(error));
+  }
+}
+
+// Applied before any Gateway is reachable, so the cached list is treated as a hint about
+// the menu only. The live "capabilities" message replaces it wholesale on connect, and the
+// session itself is always negotiated against what the Gateway says now.
+function restoreCachedCapabilities() {
+  try {
+    const serialized = durableStorage.getItem(CAPABILITIES_STORAGE_KEY);
+    if (!serialized) {
+      return;
+    }
+    const cached = JSON.parse(serialized);
+    if (Array.isArray(cached.videoModes) && cached.videoModes.length > 0) {
+      applyCapabilities(cached);
+    }
+  } catch (error) {
+    log("Unable to restore cached Gateway capabilities: " + errorMessage(error));
+  }
+}
+
 function applyCapabilities(message) {
+  cacheCapabilities(message);
   videoModes = Array.isArray(message.videoModes) ? message.videoModes : [];
   if (videoModes.length > 0) {
     replaceSelectOptions(resolutionSelect, videoModes, {
@@ -1195,6 +1299,7 @@ function closePeerConnection() {
     track.stop();
   });
   updateTrackCounts();
+  frameInterpolation.setEnabled(false);
   videoElement.hidden = true;
   playbackPromptElement.hidden = true;
   connectionStateElement.textContent = "closed";
@@ -1213,6 +1318,55 @@ async function startPlayback() {
       log("Audio playback requires pressing OK");
     }
   }
+}
+
+const frameInterpolation = FrameInterpolation.create({
+  video: videoElement,
+  canvas: interpolationCanvas,
+  log: log,
+});
+
+const INTERPOLATION_STATUS_LABELS = {
+  off: "Off",
+  starting: "Starting",
+  probing: "Checking video access",
+  active: "On",
+  "no-headroom": "On — no spare frames",
+  unsupported: "Unavailable on this TV",
+  failed: "Stopped after an error",
+};
+
+// Second line of the same row. Empty where the label already says everything: an explanation
+// repeated under a label that carries it reads as two different pieces of information.
+const INTERPOLATION_STATUS_DETAILS = {
+  off: "costs one frame of latency",
+  unsupported: "this TV will not share video frames",
+};
+
+// Only ever runs while a stream is actually on screen and in the foreground. Leaving the
+// canvas compositing over a hidden video would keep a full-resolution draw loop alive for
+// nothing, on the one thread this app cannot afford to lose.
+function applyFrameInterpolation() {
+  frameInterpolation.setEnabled(interpolationSelect.value === "true"
+    && !streamingScreen.hidden && !document.hidden);
+  updateInterpolationStatus();
+}
+
+// Written into the interpolation row itself rather than a row of its own. Two adjacent rows
+// both reading "Off", only one of them selectable, is a menu that invites you to try to
+// select the wrong one.
+function updateInterpolationStatus() {
+  const status = frameInterpolation.status();
+  const label = INTERPOLATION_STATUS_LABELS[status.reason] || status.reason;
+  const measured = status.reason === "active" || status.reason === "no-headroom";
+  const detail = measured
+    ? String(status.sourceFps) + " → " + String(status.outputFps) + " fps, +"
+      + String(Math.round(status.addedLatencyMs)) + " ms"
+    : INTERPOLATION_STATUS_DETAILS[status.reason] || "";
+  interpolationStatusElement.textContent = detail ? label + " — " + detail : label;
+  overlay.interpolation.textContent = measured
+    ? String(status.sourceFps) + " → " + String(status.outputFps)
+    : label;
 }
 
 function updateTrackCounts() {
@@ -1254,6 +1408,7 @@ function showStreaming() {
   updateStreamOverlay();
   showOverlayTemporarily();
   startPlayback();
+  applyFrameInterpolation();
 }
 
 function showHome(view) {
@@ -1327,6 +1482,7 @@ function focusFirstHomeControl() {
 
 function closeActiveGatewayConnection() {
   gatewayConnectionToken += 1;
+  cancelGatewayWake();
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -1351,10 +1507,89 @@ function activateGateway(gatewayId) {
     ui.showApplications();
     return;
   }
+  if (gatewayWakeIsActive(gateway.id)) {
+    showNotification("Waking " + gateway.name, "Waiting for the PC to start...", false);
+    return;
+  }
+  // Choosing a PC that is off means the user wants it on, so wake it when the TV can.
+  if (gateway.macAddress && gatewayRuntimeStates.get(gateway.id) === "Offline" && wakeOnLan.isSupported()) {
+    wakeGateway(gateway.id);
+    return;
+  }
   closeActiveGatewayConnection();
   activeGateway = gateway;
   openApplicationsAfterConnection = true;
   connectGateway(gateway);
+}
+
+function gatewayWakeIsActive(gatewayId) {
+  return Boolean(gatewayWake && gatewayWake.gatewayId === gatewayId);
+}
+
+function cancelGatewayWake() {
+  if (gatewayWake) {
+    clearTimeout(gatewayWake.timer);
+    gatewayWake = null;
+  }
+}
+
+function finishGatewayWake(gatewayId) {
+  if (!gatewayWakeIsActive(gatewayId)) {
+    return;
+  }
+  const name = gatewayWake.name;
+  cancelGatewayWake();
+  showNotification(name + " is awake", "Loading Sunshine applications...", false);
+}
+
+function gatewayWakeTimedOut(gatewayId) {
+  if (!gatewayWakeIsActive(gatewayId)) {
+    return;
+  }
+  const name = gatewayWake.name;
+  closeActiveGatewayConnection();
+  setGatewayRuntimeState(gatewayId, "Offline");
+  const message = name + " did not wake up. Check that Wake-on-LAN is enabled on the PC.";
+  setHomeMessage(message, true);
+  showNotification("PC did not wake up", message, true);
+}
+
+// Sends the magic packet and keeps connecting until the Gateway answers or the PC has had
+// GATEWAY_WAKE_TIMEOUT_MS to boot. Sending it again to a PC that is already on is harmless.
+function wakeGateway(gatewayId) {
+  const gateway = gatewayStore.find(gatewayId);
+  if (!gateway || sessionState !== "idle") {
+    return false;
+  }
+  if (!gateway.macAddress) {
+    showNotification("Wake PC unavailable",
+      "Connect to " + gateway.name + " once while the PC is on so the TV can learn how to wake it.", true);
+    return false;
+  }
+  closeActiveGatewayConnection();
+  activeGateway = gateway;
+  openApplicationsAfterConnection = true;
+  gatewayWake = {
+    gatewayId: gateway.id,
+    name: gateway.name,
+    timer: setTimeout(function () { gatewayWakeTimedOut(gateway.id); }, GATEWAY_WAKE_TIMEOUT_MS),
+  };
+  log("Sending Wake-on-LAN to " + gateway.name + " (" + gateway.macAddress + ")");
+  wakeOnLan.wake(gateway.macAddress, gateway.host).then(function (result) {
+    log("Wake-on-LAN sent " + result.sent + " packet(s) to " + gateway.name);
+    if (gatewayWakeIsActive(gateway.id)) {
+      showNotification("Waking " + gateway.name, "Waiting for the PC to start...", false);
+    }
+  }).catch(function (error) {
+    log("Wake-on-LAN failed for " + gateway.name + ": " + errorMessage(error));
+    if (gatewayWakeIsActive(gateway.id)) {
+      cancelGatewayWake();
+      renderGateways();
+    }
+    showNotification("Unable to wake " + gateway.name, errorMessage(error), true);
+  });
+  connectGateway(gateway);
+  return true;
 }
 
 function gatewayEditorIsOpen() {
@@ -1531,9 +1766,16 @@ function openGatewayContextMenu() {
   }
   gatewayContextGatewayId = gateway.id;
   gatewayContextHeading.textContent = gateway.name;
+  gatewayWakeButton.hidden = !gateway.macAddress || gatewayRuntimeStates.get(gateway.id) === "Online";
   gatewayContextMenu.hidden = false;
-  gatewayEditButton.focus();
+  (gatewayWakeButton.hidden ? gatewayEditButton : gatewayWakeButton).focus();
   return true;
+}
+
+function wakeGatewayFromContextMenu() {
+  const gatewayId = gatewayContextGatewayId;
+  closeGatewayContextMenu();
+  wakeGateway(gatewayId);
 }
 
 function openGatewayRemoveDialog() {
@@ -1794,7 +2036,18 @@ function gamepadUiRoute() {
 function settingLabel(select) {
   const row = select && select.closest(".setting-row");
   const label = row && row.querySelector("span");
-  return label ? label.textContent : "Select value";
+  if (!label) {
+    return "Select value";
+  }
+  // A row may carry its own status line inside the same span. The picker is titled with the
+  // setting's name, not with the name and its current state run together.
+  let name = "";
+  Array.prototype.forEach.call(label.childNodes, function (node) {
+    if (node.nodeType === 3) {
+      name += node.textContent;
+    }
+  });
+  return name.trim() || label.textContent;
 }
 
 function settingsSelectorIsOpen() {
@@ -1918,6 +2171,10 @@ function activateFocusedControl() {
     return gatewayOctetButtons.indexOf(active) >= 0;
   }
   if (gatewayContextMenuIsOpen()) {
+    if (active === gatewayWakeButton) {
+      wakeGatewayFromContextMenu();
+      return true;
+    }
     if (active === gatewayEditButton) {
       const gatewayId = gatewayContextGatewayId;
       closeGatewayContextMenu();
@@ -2008,16 +2265,6 @@ function goBackFromUiInput() {
     return true;
   }
 
-  if (settingsSelectorIsOpen()) {
-    if (isUp || isDown) {
-      event.preventDefault();
-      navigateUi(isDown ? "down" : "up");
-    } else if (isEnter) {
-      event.preventDefault();
-      activateFocusedControl();
-    }
-    return;
-  }
   if (ui && ui.goBack()) {
     return true;
   }
@@ -2124,6 +2371,10 @@ hdrSelect.addEventListener("change", function () {
   persistCurrentPreferences();
 });
 bitrateSelect.addEventListener("change", persistCurrentPreferences);
+interpolationSelect.addEventListener("change", function () {
+  persistCurrentPreferences();
+  applyFrameInterpolation();
+});
 
 function updateRemoteTracksForVisibility() {
   const enabled = !document.hidden;
@@ -2136,6 +2387,7 @@ function updateRemoteTracksForVisibility() {
   } else if (!enabled) {
     suspendGamepadInput(true);
   }
+  applyFrameInterpolation();
 }
 
 document.addEventListener("visibilitychange", updateRemoteTracksForVisibility);
@@ -2449,6 +2701,7 @@ const gamepadInputManager = new window.GamepadInputManager({
   log: log,
   reportError: reportError,
   diagnostics: gamepadDiagnostics,
+  isDiagnosticsVisible: diagnosticsVisible,
   overlay: overlay.gamepad,
   mouseOverlay: document.getElementById("mouse-mode-overlay"),
   onStopShortcut: handleGamepadStopShortcut,
@@ -2456,6 +2709,7 @@ const gamepadInputManager = new window.GamepadInputManager({
 });
 
 const gamepadUiNavigation = window.GamepadUiNavigation.create({
+  log: log,
   route: gamepadUiRoute,
   navigate: navigateUi,
   activate: activateFocusedControl,
@@ -2560,10 +2814,24 @@ function displayRuntimeValue(element, value) {
     : typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+function diagnosticsVisible() {
+  return !diagnosticsElement.hidden;
+}
+
 async function updateStatistics() {
   if (!peerConnection) {
     return;
   }
+  // getStats() walks every RTP report and this then writes ~25 DOM nodes, once a second,
+  // for a panel that is hidden unless the viewer opened it. It cannot simply stop while
+  // hidden because it also emits the five-second stream diagnostics line, so it slows to
+  // the slowest cadence that still keeps that line on schedule.
+  const sampledAt = performance.now();
+  if (!diagnosticsVisible()
+      && sampledAt - lastStatisticsSampleTime < HIDDEN_STATISTICS_INTERVAL_MS) {
+    return;
+  }
+  lastStatisticsSampleTime = sampledAt;
   try {
     const reports = await peerConnection.getStats();
     let inboundVideo = null;
@@ -2697,6 +2965,7 @@ gatewayEditorCancelButton.addEventListener("click", function () {
   closeGatewayEditor();
 });
 gatewayEditorConnectButton.addEventListener("click", connectGatewayFromEditor);
+gatewayWakeButton.addEventListener("click", wakeGatewayFromContextMenu);
 gatewayEditButton.addEventListener("click", function () {
   const gatewayId = gatewayContextGatewayId;
   closeGatewayContextMenu();
@@ -2724,11 +2993,21 @@ ui.setActiveGateway(null);
 ui.setSunshineState("Unknown");
 ui.setWebRtcState("Idle");
 
-setInterval(updateStatistics, 1000);
+setInterval(function () {
+  updateStatistics();
+  updateInterpolationStatus();
+}, 1000);
 updateTrackCounts();
 gamepadInputManager.updateDiagnostics();
 syncGamepadUi();
 showHome();
 gamepadUiNavigation.start();
+log("Persistent storage: " + durableStorage.describe());
+// Restored before the cached capabilities are applied: applying them persists the whole
+// preference set, and a select still holding its markup default would write that default
+// back over the saved value.
+interpolationSelect.value = savedPreferences.frameInterpolation ? "true" : "false";
+restoreCachedCapabilities();
+updateInterpolationStatus();
 renderGateways();
 probeSavedGateways();

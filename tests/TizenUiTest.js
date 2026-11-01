@@ -7,6 +7,7 @@ const path = require("path");
 global.window = global;
 require("../tizen/ui.js");
 require("../tizen/preferences.js");
+require("../tizen/wake-on-lan.js");
 require("../tizen/gateway-store.js");
 require("../tizen/gateway-ipv4.js");
 require("../tizen/application-artwork.js");
@@ -32,11 +33,18 @@ assert.strictEqual(testing.readableGatewayAddress("ws://198.51.100.4:8000"), "19
 assert.strictEqual(testing.readableGatewayAddress("not a URL"), "-",
   "invalid gateway URLs must not fabricate an address");
 
-const html = fs.readFileSync(path.join(__dirname, "../tizen/index.html"), "utf8");
-const config = fs.readFileSync(path.join(__dirname, "../tizen/config.xml"), "utf8");
-const uiSource = fs.readFileSync(path.join(__dirname, "../tizen/ui.js"), "utf8");
-const appSource = fs.readFileSync(path.join(__dirname, "../tizen/app.js"), "utf8");
-const uiCss = fs.readFileSync(path.join(__dirname, "../tizen/ui.css"), "utf8");
+// Several assertions below span more than one line. Git checks these sources out with CRLF
+// endings wherever core.autocrlf is on, which is the default on Windows, so reading them
+// verbatim makes those assertions fail on the source they are meant to be checking.
+function readSource(name) {
+  return fs.readFileSync(path.join(__dirname, "../tizen/", name), "utf8").replace(/\r\n/g, "\n");
+}
+
+const html = readSource("index.html");
+const config = readSource("config.xml");
+const uiSource = readSource("ui.js");
+const appSource = readSource("app.js");
+const uiCss = readSource("ui.css");
 assert.ok(html.includes('id="settings-screen"'), "settings view is missing");
 assert.ok(html.includes("Moonlight WebRTC Client"), "the Client title is missing from the UI");
 assert.ok(!html.includes("Moonlight WebRTC Tizen"), "the old visible Tizen title remains");
@@ -186,24 +194,85 @@ function storage() {
 const persistentStorage = storage();
 const preferences = global.ClientPreferences.create(persistentStorage);
 assert.deepStrictEqual(preferences.load(), {
-  resolution: null, codec: null, hdr: false, bitrateKbps: null,
+  resolution: null, codec: null, hdr: false, bitrateKbps: null, frameInterpolation: false,
 }, "empty storage must use the current defaults");
 preferences.update("resolution", "3840x2160");
 preferences.update("codec", "hevc");
 preferences.update("hdr", true);
 preferences.update("bitrateKbps", 50000);
+preferences.update("frameInterpolation", true);
 assert.deepStrictEqual(global.ClientPreferences.create(persistentStorage).load(), {
   resolution: "3840x2160", codec: "hevc", hdr: true, bitrateKbps: 50000,
+  frameInterpolation: true,
 }, "saved preferences must survive a simulated application reload");
 assert.ok(!Object.prototype.hasOwnProperty.call(preferences.snapshot(), "fps"),
   "FPS must not become a persisted selectable preference");
 persistentStorage.setItem(global.ClientPreferences.STORAGE_KEY, JSON.stringify({
-  resolution: 4, codec: false, hdr: "true", bitrateKbps: -1,
+  resolution: 4, codec: false, hdr: "true", bitrateKbps: -1, frameInterpolation: "yes",
 }));
 assert.deepStrictEqual(global.ClientPreferences.create(persistentStorage).load(), {
-  resolution: null, codec: null, hdr: false, bitrateKbps: null,
+  resolution: null, codec: null, hdr: false, bitrateKbps: null, frameInterpolation: false,
 }, "invalid persisted values must fall back safely");
 assert.strictEqual(global.ClientPreferences.resolveSupported("av1", ["h264", "hevc"], "h264"), "h264",
   "unsupported persisted options must fall back to the current supported default");
+
+// The resolution list is only ever populated from the Gateway's "capabilities" message, so
+// without a cache the modes above 1080p are missing from Settings until the TV has connected.
+assert.ok(appSource.includes("function restoreCachedCapabilities()"),
+  "the advertised video modes must survive a restart, or 4K is absent until the app connects");
+assert.ok(appSource.includes("cacheCapabilities(message);"),
+  "every capabilities message must refresh the cache it is restored from");
+assert.ok(
+  appSource.indexOf('interpolationSelect.value = savedPreferences.frameInterpolation')
+    < appSource.indexOf("restoreCachedCapabilities();\nupdateInterpolationStatus();"),
+  "restoring the cache persists every preference, so the selects must hold their saved "
+    + "values before it runs");
+assert.ok(appSource.includes("frameInterpolation.setEnabled(false);"),
+  "tearing a session down must stop the interpolation loop");
+assert.ok(html.includes('id="interpolation-select"') && html.includes('id="interpolation-canvas"'),
+  "frame interpolation needs both its setting and its presentation surface");
+// Remote and gamepad navigation both walk the .focusable elements of the open panel, so a
+// control that loses that class is on screen and unreachable - which is exactly how this
+// setting was first reported.
+assert.ok(/id="interpolation-select"[^>]*class="[^"]*\bfocusable\b/.test(html),
+  "the interpolation setting must carry the class that puts it in the navigation chain");
+const interpolationRow = html.slice(
+  html.indexOf('for="interpolation-select"'),
+  html.indexOf("</label>", html.indexOf('for="interpolation-select"'))
+);
+assert.ok(interpolationRow.includes('id="interpolation-status"'),
+  "the status belongs inside the interpolation row: a second row repeating \"Off\" next to "
+    + "it is a target the remote cannot land on");
+
+// The widget is assembled from an explicit file list, so a script added to the markup but
+// not to that list produces a package that loads nothing and shows a blank screen on the TV.
+const packagingScript = fs.readFileSync(
+  path.join(__dirname, "../packaging/tizen/build-package.ps1"), "utf8");
+const referencedScripts = (html.match(/<script src="([^"]+)"/g) || []).map(function (tag) {
+  return tag.replace(/^<script src="/, "").replace(/"$/, "");
+});
+assert.ok(referencedScripts.length > 0, "the client must load its modules from the markup");
+referencedScripts.forEach(function (name) {
+  assert.ok(fs.existsSync(path.join(__dirname, "../tizen/", name)),
+    name + " is loaded by index.html but does not exist");
+  assert.ok(packagingScript.includes("'" + name + "'"),
+    name + " is loaded by index.html but is not packaged into the widget");
+});
+
+assert.ok(html.indexOf('src="wake-on-lan.js"') >= 0
+  && html.indexOf('src="wake-on-lan.js"') < html.indexOf('src="gateway-store.js"'),
+  "the Gateway store validates Wake-on-LAN addresses, so wake-on-lan.js must load first");
+assert.ok(html.includes('id="gateway-wake-button"') && html.includes('type="button" hidden>Wake PC</button>'),
+  "the Gateway menu must offer Wake PC, hidden until the Gateway's address is known");
+assert.ok(packagingScript.includes("build-wake-on-lan.ps1") && packagingScript.includes("'wasm'"),
+  "the widget must package the Wake-on-LAN WebAssembly module next to its loader");
+assert.ok(appSource.includes("learnGatewayMacAddress(gateway.id, message);"),
+  "Gateway probes must remember the address needed to wake each saved PC");
+assert.ok(appSource.includes('gatewayRuntimeStates.get(gateway.id) === "Offline" && wakeOnLan.isSupported()'),
+  "selecting an offline Gateway must wake it when the TV can");
+assert.ok(appSource.includes("if (activeGateway && gatewayWakeIsActive(activeGateway.id)) {\n      setGatewayRuntimeState"),
+  "failed attempts while a PC boots must retry quietly instead of reporting a disconnect");
+assert.ok(appSource.includes("if (active === gatewayWakeButton) {"),
+  "remote OK and gamepad A must activate Wake PC through the shared menu action");
 
 console.log("Tizen UI tests passed");

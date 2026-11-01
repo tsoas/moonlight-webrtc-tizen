@@ -191,6 +191,9 @@ Json makeGatewayStatus(const GatewayStatus& status)
     if (status.runningAppId) {
         message["runningAppId"] = *status.runningAppId;
     }
+    if (status.macAddress) {
+        message["macAddress"] = *status.macAddress;
+    }
     return message;
 }
 

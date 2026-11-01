@@ -7,6 +7,7 @@
     codec: null,
     hdr: false,
     bitrateKbps: null,
+    frameInterpolation: false,
   });
 
   function copyDefaults() {
@@ -15,6 +16,7 @@
       codec: DEFAULTS.codec,
       hdr: DEFAULTS.hdr,
       bitrateKbps: DEFAULTS.bitrateKbps,
+      frameInterpolation: DEFAULTS.frameInterpolation,
     };
   }
 
@@ -34,6 +36,9 @@
     }
     if (Number.isInteger(candidate.bitrateKbps) && candidate.bitrateKbps > 0) {
       values.bitrateKbps = candidate.bitrateKbps;
+    }
+    if (typeof candidate.frameInterpolation === "boolean") {
+      values.frameInterpolation = candidate.frameInterpolation;
     }
     return values;
   }

@@ -89,6 +89,14 @@ target_compile_features(service_ipc_server PUBLIC cxx_std_20)
 target_include_directories(service_ipc_server PUBLIC src)
 target_link_libraries(service_ipc_server PUBLIC service_ipc_protocol advapi32)
 
+add_library(wake_on_lan_address
+    src/platform/WakeOnLanAddress.cpp
+)
+
+target_compile_features(wake_on_lan_address PUBLIC cxx_std_20)
+target_include_directories(wake_on_lan_address PUBLIC src)
+target_link_libraries(wake_on_lan_address PUBLIC iphlpapi ws2_32)
+
 add_library(moonlight_video_profile
     src/moonlight/MoonlightVideoProfile.cpp
 )
@@ -169,6 +177,7 @@ target_link_libraries(moonlight_webrtc PRIVATE
     moonlight_input_bridge
     moonlight_media_bridge
     opus_file_reader
+    wake_on_lan_address
     webrtc_media_sender
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
@@ -317,4 +326,10 @@ if(BUILD_TESTING)
     )
     target_link_libraries(management_ipc_protocol_test PRIVATE management_ipc_protocol)
     add_test(NAME management_ipc_protocol_test COMMAND management_ipc_protocol_test)
+
+    add_executable(wake_on_lan_address_test
+        tests/WakeOnLanAddressTest.cpp
+    )
+    target_link_libraries(wake_on_lan_address_test PRIVATE wake_on_lan_address)
+    add_test(NAME wake_on_lan_address_test COMMAND wake_on_lan_address_test)
 endif()

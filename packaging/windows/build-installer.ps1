@@ -24,9 +24,14 @@ function Find-VisualStudioFile {
 
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (Test-Path -LiteralPath $vswhere) {
-        $installationPath = (& $vswhere -latest -products * -property installationPath | Select-Object -First 1).Trim()
-        if ($installationPath) {
-            $candidate = Get-ChildItem -LiteralPath $installationPath -Recurse -Filter $LeafName -File |
+        # The newest installation is not necessarily the one with the C++ tools (for example a
+        # Community IDE next to the Build Tools that actually build the Gateway), so try each.
+        $installationPaths = @(& $vswhere -all -sort -products * -property installationPath)
+        foreach ($installationPath in $installationPaths) {
+            if ([string]::IsNullOrWhiteSpace($installationPath)) {
+                continue
+            }
+            $candidate = Get-ChildItem -LiteralPath $installationPath.Trim() -Recurse -Filter $LeafName -File |
                 Select-Object -First 1
             if ($candidate) {
                 return $candidate.FullName

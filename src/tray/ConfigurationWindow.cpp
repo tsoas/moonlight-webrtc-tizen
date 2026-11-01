@@ -102,6 +102,19 @@ std::wstring boolValue(const std::optional<bool>& value, const wchar_t* trueValu
     return *value ? trueValue : falseValue;
 }
 
+std::wstring connectionValue(const StatusState& state)
+{
+    if (!state.status) return L"Unavailable";
+    auto value = boolValue(state.status->sunshineConnected, L"Connected", L"Disconnected");
+    // The address box holds what the Gateway dials; the name Sunshine reports for
+    // itself belongs here, where nobody can save it back as an address.
+    if (state.status->sunshineConnected && *state.status->sunshineConnected
+        && state.status->sunshineName) {
+        value += L" \x2014 " + widen(*state.status->sunshineName);
+    }
+    return value;
+}
+
 std::wstring applicationValue(const StatusState& state)
 {
     if (!state.status || !state.status->runningApplicationId) return L"None";
@@ -520,7 +533,7 @@ void ConfigurationWindow::paint(HWND window)
         drawText(dc, L"Host", RECT{panel.left + scale(28), panel.top + scale(78), panel.left + (panel.right - panel.left) / 2, panel.top + scale(123)},
                  labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER);
         addRows(L"Sunshine", {
-            {L"Connection", state.status ? boolValue(state.status->sunshineConnected, L"Connected", L"Disconnected") : L"Unavailable"},
+            {L"Connection", connectionValue(state)},
             {L"Pairing", state.status ? boolValue(state.status->sunshinePaired, L"Paired", L"Not paired") : L"Unavailable"},
             {L"Running application", applicationValue(state)},
             {L"Session", state.status && state.status->sessionActive && *state.status->sessionActive ? L"Active" : L"Inactive"},

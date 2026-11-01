@@ -5,6 +5,13 @@
   const MAX_CONTROLLERS = 16;
   const POLL_INTERVAL_MS = 1000 / 120;
   const KEEPALIVE_INTERVAL_MS = 250;
+  // Input is polled at 120 Hz for latency; nobody can read numbers that fast.
+  const DIAGNOSTICS_RENDER_INTERVAL_MS = 250;
+  // A healthy gamepad channel carries well under 30 KB/s. Anything above this means the
+  // association has stalled, and queuing more only makes the eventual recovery worse.
+  const MAX_BUFFERED_BYTES = 64 * 1024;
+  // The poll loop runs 120 times a second, so an unthrottled failure log is itself a hang.
+  const ERROR_LOG_INTERVAL_MS = 5000;
   // Mirror BrightCraft's Moonlight Tizen implementation. Sunshine renews the
   // state when it changes, including a zero-magnitude state to stop rumble.
   const RUMBLE_DURATION_MS = 5000;
@@ -38,10 +45,14 @@
     return navigator.getGamepads() || [];
   }
 
+  // Shared so a controller that is missing a button does not allocate a placeholder
+  // on every one of the 120 polls per second. Never mutated.
+  const MISSING_BUTTON = { pressed: false, value: 0 };
+
   function button(gamepad, index) {
     return gamepad.buttons && gamepad.buttons[index]
       ? gamepad.buttons[index]
-      : { pressed: false, value: 0 };
+      : MISSING_BUTTON;
   }
 
   function buttonPressed(gamepad, index) {
@@ -56,32 +67,61 @@
     return gamepad.axes[index];
   }
 
+  // Built once. Rebuilding this table inside the function allocated sixteen arrays on
+  // every poll, which on a TV is paid back as GC pauses during video decode.
+  const BUTTON_MAP = [
+    [0, BUTTONS.A], [1, BUTTONS.B], [2, BUTTONS.X], [3, BUTTONS.Y],
+    [4, BUTTONS.LB], [5, BUTTONS.RB], [8, BUTTONS.BACK], [9, BUTTONS.START],
+    [10, BUTTONS.LEFT_STICK], [11, BUTTONS.RIGHT_STICK],
+    [12, BUTTONS.DPAD_UP], [13, BUTTONS.DPAD_DOWN],
+    [14, BUTTONS.DPAD_LEFT], [15, BUTTONS.DPAD_RIGHT], [16, BUTTONS.GUIDE],
+  ];
+
   function standardButtonFlags(gamepad) {
     let flags = 0;
-    [
-      [0, BUTTONS.A], [1, BUTTONS.B], [2, BUTTONS.X], [3, BUTTONS.Y],
-      [4, BUTTONS.LB], [5, BUTTONS.RB], [8, BUTTONS.BACK], [9, BUTTONS.START],
-      [10, BUTTONS.LEFT_STICK], [11, BUTTONS.RIGHT_STICK],
-      [12, BUTTONS.DPAD_UP], [13, BUTTONS.DPAD_DOWN],
-      [14, BUTTONS.DPAD_LEFT], [15, BUTTONS.DPAD_RIGHT], [16, BUTTONS.GUIDE],
-    ].forEach(function (mapping) {
-      if (buttonPressed(gamepad, mapping[0])) {
-        flags |= mapping[1];
+    for (let index = 0; index < BUTTON_MAP.length; index += 1) {
+      if (buttonPressed(gamepad, BUTTON_MAP[index][0])) {
+        flags |= BUTTON_MAP[index][1];
       }
-    });
+    }
     return flags;
   }
 
-  function completeState(gamepad) {
-    return {
-      buttons: standardButtonFlags(gamepad),
-      leftTrigger: Number(button(gamepad, 6).value) || 0,
-      rightTrigger: Number(button(gamepad, 7).value) || 0,
-      leftStickX: axis(gamepad, 0),
-      leftStickY: axis(gamepad, 1),
-      rightStickX: axis(gamepad, 2),
-      rightStickY: axis(gamepad, 3),
-    };
+  // Fills a caller-owned object so the poll loop can reuse one state per controller
+  // instead of allocating a fresh one each tick.
+  function completeState(gamepad, target) {
+    const state = target || neutralState();
+    state.buttons = standardButtonFlags(gamepad);
+    state.leftTrigger = Number(button(gamepad, 6).value) || 0;
+    state.rightTrigger = Number(button(gamepad, 7).value) || 0;
+    state.leftStickX = axis(gamepad, 0);
+    state.leftStickY = axis(gamepad, 1);
+    state.rightStickX = axis(gamepad, 2);
+    state.rightStickY = axis(gamepad, 3);
+    return state;
+  }
+
+  // Replaces a JSON.stringify fingerprint that ran once per controller per poll purely
+  // to detect change. Every field is a number, so this comparison is exact and free.
+  function statesEqual(left, right) {
+    return left.buttons === right.buttons
+      && left.leftTrigger === right.leftTrigger
+      && left.rightTrigger === right.rightTrigger
+      && left.leftStickX === right.leftStickX
+      && left.leftStickY === right.leftStickY
+      && left.rightStickX === right.rightStickX
+      && left.rightStickY === right.rightStickY;
+  }
+
+  function copyState(target, source) {
+    target.buttons = source.buttons;
+    target.leftTrigger = source.leftTrigger;
+    target.rightTrigger = source.rightTrigger;
+    target.leftStickX = source.leftStickX;
+    target.leftStickY = source.leftStickY;
+    target.rightStickX = source.rightStickX;
+    target.rightStickY = source.rightStickY;
+    return target;
   }
 
   function neutralState() {
@@ -125,7 +165,33 @@
     this.pollTimer = null;
     this.nextPollTime = 0;
     this.sessionActive = false;
+    this.lastDiagnosticsRenderTime = 0;
+    this.lastOverlayText = null;
+    this.lastErrorLogTime = 0;
   }
+
+  // send() rejects a payload whenever the channel closes between the readyState check
+  // and the call, or when the implementation's send buffer is full. That exception used
+  // to escape the poll loop, which then never rescheduled itself: the controller went
+  // dead for the rest of the session while the stream kept playing.
+  GamepadInputManager.prototype.sendOn = function (channel, payload, description) {
+    try {
+      channel.send(payload);
+      return true;
+    } catch (error) {
+      this.logThrottled("Dropped " + description + ": " + String(error));
+      return false;
+    }
+  };
+
+  GamepadInputManager.prototype.logThrottled = function (message) {
+    const now = performance.now();
+    if (now - this.lastErrorLogTime < ERROR_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastErrorLogTime = now;
+    this.options.log(message);
+  };
 
   GamepadInputManager.prototype.gamepadAtIndex = function (browserIndex) {
     const gamepads = currentGamepads();
@@ -159,7 +225,9 @@
       announced: false,
       moonlightSlot: null,
       sequence: 0,
-      lastFingerprint: "",
+      pollState: neutralState(),
+      lastSentState: neutralState(),
+      hasSentState: false,
       lastSendTime: 0,
       rateWindowStart: performance.now(),
       messagesInWindow: 0,
@@ -167,6 +235,7 @@
       gatewayMessagesPerSecond: 0,
       sequenceGaps: 0,
       staleStates: 0,
+      droppedStates: 0,
       mouseMode: false,
       stopShortcutHeld: false,
       rumble: {
@@ -218,7 +287,7 @@
         || document.hidden || !this.options.isStreaming()) {
       return false;
     }
-    channel.send(JSON.stringify({
+    const sent = this.sendOn(channel, JSON.stringify({
       v: PROTOCOL_VERSION,
       type: "gamepad-connected",
       controllerId: record.controllerId,
@@ -231,7 +300,10 @@
       axes: record.axisCount,
       dualRumble: record.dualRumble,
       triggerRumble: record.triggerRumble,
-    }));
+    }), "gamepad announcement");
+    if (!sent) {
+      return false;
+    }
     record.announced = true;
     return true;
   };
@@ -241,12 +313,21 @@
     if (!record || !record.announced || !channelIsOpen(channel)) {
       return false;
     }
-    record.sequence += 1;
-    channel.send(JSON.stringify({
+    // Dropping a state here costs nothing: the next poll is 8 ms away and carries a newer
+    // one, and the keepalive re-sends it once the input goes quiet. Queuing it instead is
+    // what turns a brief network stall into a controller that never recovers.
+    if (Number(channel.bufferedAmount) > MAX_BUFFERED_BYTES) {
+      record.droppedStates += 1;
+      this.logThrottled("Gamepad channel congested: buffered="
+        + String(channel.bufferedAmount) + " dropped=" + String(record.droppedStates));
+      return false;
+    }
+    const sequence = record.sequence + 1;
+    const sent = this.sendOn(channel, JSON.stringify({
       v: PROTOCOL_VERSION,
       type: "gamepad-state",
       controllerId: record.controllerId,
-      seq: record.sequence,
+      seq: sequence,
       timestampMs: now,
       buttons: state.buttons,
       leftTrigger: state.leftTrigger,
@@ -255,7 +336,12 @@
       leftStickY: state.leftStickY,
       rightStickX: state.rightStickX,
       rightStickY: state.rightStickY,
-    }));
+    }), "gamepad state");
+    if (!sent) {
+      record.droppedStates += 1;
+      return false;
+    }
+    record.sequence = sequence;
     record.lastSendTime = now;
     record.messagesInWindow += 1;
     const elapsed = now - record.rateWindowStart;
@@ -418,11 +504,11 @@
       this.sendState(record, neutralState(), performance.now());
       const channel = this.options.controlChannel();
       if (notifyGateway && channelIsOpen(channel)) {
-        channel.send(JSON.stringify({
+        this.sendOn(channel, JSON.stringify({
           v: PROTOCOL_VERSION,
           type: "gamepad-disconnected",
           controllerId: record.controllerId,
-        }));
+        }), "gamepad disconnect");
       }
     }
     this.stopRumble(record);
@@ -438,31 +524,45 @@
     if (document.hidden || !this.options.isStreaming()) {
       return;
     }
-    this.enumerate();
     const now = performance.now();
-    const manager = this;
-    this.recordsByIndex.forEach(function (record) {
-      const gamepad = manager.gamepadAtIndex(record.browserIndex);
-      if (!gamepad) {
-        return;
-      }
-      manager.announce(record);
-      const state = completeState(gamepad);
-      manager.observeStopShortcut(record, state);
-      const fingerprint = JSON.stringify(state);
-      if (fingerprint !== record.lastFingerprint
-          || now - record.lastSendTime >= KEEPALIVE_INTERVAL_MS) {
-        if (manager.sendState(record, state, now)) {
-          record.lastFingerprint = fingerprint;
+    // Whatever happens in the body, the loop has to schedule its successor. An escaping
+    // exception used to leave pollTimer null with nothing pending, so the controller
+    // stopped responding for good even though the stream carried on.
+    try {
+      this.enumerate();
+      const manager = this;
+      this.recordsByIndex.forEach(function (record) {
+        const gamepad = manager.gamepadAtIndex(record.browserIndex);
+        if (!gamepad) {
+          return;
         }
+        manager.announce(record);
+        const state = completeState(gamepad, record.pollState);
+        manager.observeStopShortcut(record, state);
+        if (!record.hasSentState || !statesEqual(record.lastSentState, state)
+            || now - record.lastSendTime >= KEEPALIVE_INTERVAL_MS) {
+          if (manager.sendState(record, state, now)) {
+            copyState(record.lastSentState, state);
+            record.hasSentState = true;
+          }
+        }
+      });
+      this.refreshDiagnostics();
+    } catch (error) {
+      this.logThrottled("Gamepad poll failed: " + String(error));
+    } finally {
+      this.nextPollTime += POLL_INTERVAL_MS;
+      // Never fire back to back. A poll that overruns its 8 ms slot — routine on a TV
+      // while the decoder is busy — used to be chased with setTimeout(0) until the loop
+      // was level again, and that burst starves the compositor: the picture stops while
+      // audio, on its own pipeline, keeps going. A skipped sample is worth nothing here;
+      // the next one is one interval away and carries newer input.
+      const earliest = performance.now() + POLL_INTERVAL_MS / 2;
+      if (this.nextPollTime < earliest) {
+        this.nextPollTime = earliest;
       }
-    });
-    this.updateDiagnostics();
-    this.nextPollTime += POLL_INTERVAL_MS;
-    if (this.nextPollTime < now - POLL_INTERVAL_MS * 4) {
-      this.nextPollTime = now + POLL_INTERVAL_MS;
+      this.schedulePoll();
     }
-    this.schedulePoll();
   };
 
   GamepadInputManager.prototype.schedulePoll = function () {
@@ -483,7 +583,7 @@
     const manager = this;
     this.recordsByIndex.forEach(function (record) {
       manager.announce(record);
-      record.lastFingerprint = "";
+      record.hasSentState = false;
     });
     this.nextPollTime = performance.now();
     this.schedulePoll();
@@ -550,7 +650,42 @@
     element.hidden = false;
   };
 
+  // The poll loop calls this at its own rate. Rendering the panel there meant rebuilding
+  // every diagnostics string 120 times a second, for a panel that is hidden unless the
+  // viewer opened it. Event-driven callers still go through updateDiagnostics directly so
+  // a connect or disconnect shows up immediately.
+  GamepadInputManager.prototype.refreshDiagnostics = function () {
+    if (!this.diagnosticsVisible()) {
+      this.updateOverlay();
+      return;
+    }
+    const now = performance.now();
+    if (now - this.lastDiagnosticsRenderTime < DIAGNOSTICS_RENDER_INTERVAL_MS) {
+      return;
+    }
+    this.updateDiagnostics();
+  };
+
+  GamepadInputManager.prototype.diagnosticsVisible = function () {
+    return typeof this.options.isDiagnosticsVisible !== "function"
+      || this.options.isDiagnosticsVisible();
+  };
+
+  GamepadInputManager.prototype.updateOverlay = function () {
+    const text = this.recordsById.size > 0
+      ? String(this.recordsById.size) + " connected" : "Disconnected";
+    if (text !== this.lastOverlayText) {
+      this.lastOverlayText = text;
+      this.options.overlay.textContent = text;
+    }
+  };
+
   GamepadInputManager.prototype.updateDiagnostics = function () {
+    this.lastDiagnosticsRenderTime = performance.now();
+    this.updateOverlay();
+    if (!this.diagnosticsVisible()) {
+      return;
+    }
     const records = Array.from(this.recordsById.values()).sort(function (left, right) {
       return left.controllerId - right.controllerId;
     });
@@ -566,8 +701,6 @@
     diagnostics.lastSequence.textContent = records.length > 0
       ? records.map(function (record) { return String(record.sequence); }).join(" / ")
       : "-";
-    this.options.overlay.textContent = records.length > 0
-      ? String(records.length) + " connected" : "Disconnected";
     if (diagnostics.controllers) {
       diagnostics.controllers.textContent = records.map(function (record) {
         const slot = record.moonlightSlot === null ? "pending" : String(record.moonlightSlot);
@@ -578,6 +711,7 @@
           + "/" + record.gatewayMessagesPerSecond.toFixed(1) + " msg/s"
           + " | gaps " + String(record.sequenceGaps)
           + " | stale " + String(record.staleStates)
+          + " | dropped " + String(record.droppedStates)
           + " | rumble " + (record.dualRumble ? "yes" : "no")
           + " (" + record.rumble.status + ")"
           + " | mouse " + (record.mouseMode ? "active" : "off");

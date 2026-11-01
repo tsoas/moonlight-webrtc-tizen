@@ -13,7 +13,10 @@ struct StatusSnapshot {
     bool serviceRunning = true;
     std::optional<bool> sunshineConnected;
     std::optional<bool> sunshinePaired;
+    // The address the Gateway dials, as configured. Keep it distinct from the name
+    // Sunshine reports for itself, which is a label and not resolvable.
     std::optional<std::string> sunshineHost;
+    std::optional<std::string> sunshineName;
     std::optional<std::string> runningApplicationId;
     std::optional<std::string> runningApplicationName;
     std::optional<bool> sessionActive;

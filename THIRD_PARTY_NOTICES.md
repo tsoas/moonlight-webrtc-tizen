@@ -68,6 +68,16 @@ The Samsung Tizen WGT contains the project's HTML, JavaScript, CSS, assets,
 and normal package-signature metadata; it does not bundle the above Windows
 runtime DLLs.
 
+It does contain the Wake-on-LAN WebAssembly module (`wasm/wake-on-lan.*`),
+built from `tizen/wasm/wake-on-lan.c` with Samsung's Emscripten fork. The
+module includes that toolchain's generated JavaScript runtime and statically
+linked system libraries:
+
+| Component | Version | Licence / notice source |
+| --- | --- | --- |
+| Emscripten (Samsung Tizen fork), runtime and system libraries | 1.39.4.7 | MIT or University of Illinois/NCSA; [Emscripten licence](https://github.com/emscripten-core/emscripten/blob/main/LICENSE) |
+| musl libc (inside Emscripten) | bundled with 1.39.4.7 | [MIT](https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT) |
+
 ## Release maintenance
 
 Publish `LICENSE`, this notice, and `MoonlightWebRTC-Source.tar.gz` with the
