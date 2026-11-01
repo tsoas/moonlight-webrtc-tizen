@@ -5,6 +5,7 @@
 #include "gateway/GatewayProtocol.h"
 #include "gateway/ManagementIpcClient.h"
 #include "gateway/ServiceIpcServer.h"
+#include "gateway/TvClientAuth.h"
 #include "gateway/WindowsServiceHost.h"
 #include "media/MediaSender.h"
 #include "moonlight/MoonlightMediaBridge.h"
@@ -13,10 +14,14 @@
 #include "moonlight/control/MoonlightSession.h"
 #include "moonlight/control/SunshineHttpClient.h"
 #include "moonlight/input/MoonlightInputBridge.h"
+#include "platform/WakeOnLanAddress.h"
 #include "session/StreamSettings.h"
 #include "webrtc/SamsungSdp.h"
 #include "webrtc/WebRtcMediaSender.h"
 
+#include <Limelight.h>
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <charconv>
@@ -63,6 +68,8 @@ constexpr auto RtpCname = "moonlight-webrtc";
 constexpr auto MediaStreamId = "stream1";
 // Artwork is capped at 8 MiB before Base64 and JSON framing expand it for WebSocket transport.
 constexpr std::size_t MaxGatewayWebSocketMessageSize = 12 * 1024 * 1024;
+// Connections that have not authenticated yet; the oldest is dropped beyond this.
+constexpr std::size_t MaxPendingTvConnections = 8;
 volatile std::sig_atomic_t ConsoleShutdownRequested = 0;
 
 std::string base64Encode(const std::vector<std::uint8_t>& bytes)
@@ -84,6 +91,26 @@ std::string base64Encode(const std::vector<std::uint8_t>& bytes)
 int runningSunshineApplicationId(const gateway::moonlight::SunshineServerInfo& serverInfo)
 {
     return gateway::moonlight::SunshineHttpClient::runningApplicationId(serverInfo);
+}
+
+gateway::managementipc::Result classifySunshineDetectionFailure(const std::exception& error)
+{
+    // Detection reports transport, TLS and protocol faults through one exception type,
+    // so the message is the only signal left for a code the UI can act on. Callers must
+    // apply this to detection alone: reporting an unrelated local failure as
+    // "unreachable" sends the user hunting for a network problem that does not exist.
+    const std::string detail = error.what();
+    const bool tls = detail.find("certificate") != std::string::npos
+        || detail.find("SSL") != std::string::npos || detail.find("TLS") != std::string::npos;
+    const bool protocol = detail.find("XML") != std::string::npos
+        || detail.find("status") != std::string::npos;
+    if (tls) {
+        return {false, "tls-pinning-failed", "Sunshine TLS or certificate pinning failed"};
+    }
+    if (protocol) {
+        return {false, "protocol-failed", "Sunshine responded with an invalid protocol response"};
+    }
+    return {false, "unreachable", "Sunshine is unreachable"};
 }
 
 void requestShutdown(int)
@@ -128,6 +155,7 @@ struct ProgramOptions {
     std::optional<std::string> host;
     std::string application = "Desktop";
     bool pair = false;
+    bool pairTv = false;
     ProgramHostMode hostMode = ProgramHostMode::Console;
     std::optional<std::filesystem::path> dataDirectory;
     bool dataDirectoryExplicit = false;
@@ -149,6 +177,8 @@ ProgramOptions parseProgramOptions(int argc, char** argv)
             options.application = std::string(argument.substr(6));
         } else if (argument == "--pair") {
             options.pair = true;
+        } else if (argument == "--pair-tv") {
+            options.pairTv = true;
         } else if (argument == "--console") {
             options.hostMode = ProgramHostMode::Console;
         } else if (argument == "--service") {
@@ -161,9 +191,15 @@ ProgramOptions parseProgramOptions(int argc, char** argv)
         } else {
             throw std::invalid_argument(
                 "Usage: moonlight_webrtc [--source=test|--source=moonlight] "
-                "[--host=<host>] [--app=<name>] [--pair] [--console|--service] "
+                "[--host=<host>[:<port>]] [--app=<name>] [--pair] [--pair-tv] [--console|--service] "
                 "[--data-dir=<path>] [--migrate-data-from=<path>]");
         }
+    }
+
+    if (options.host
+        && !gateway::moonlight::MoonlightIdentity::isValidSunshineEndpoint(*options.host)) {
+        throw std::invalid_argument(
+            "--host expects a hostname or IPv4 address, optionally followed by :port");
     }
 
     if (options.sourceMode != MediaSourceMode::Moonlight
@@ -174,6 +210,13 @@ ProgramOptions parseProgramOptions(int argc, char** argv)
     }
     if (options.pair && options.hostMode == ProgramHostMode::Service) {
         throw std::invalid_argument("--pair cannot run as a Windows service");
+    }
+    // The service pairs TVs from the tray; the console has no tray, so it prints the PIN.
+    if (options.pairTv
+        && (options.sourceMode != MediaSourceMode::Moonlight
+            || options.hostMode == ProgramHostMode::Service || options.pair)) {
+        throw std::invalid_argument(
+            "--pair-tv requires --source=moonlight in console mode and cannot be combined with --pair");
     }
     if (options.migrationSourceDirectory) {
         if (options.sourceMode != MediaSourceMode::Moonlight || !options.dataDirectory) {
@@ -241,7 +284,12 @@ struct Session {
     std::uint64_t sessionId = 0;
     gateway::StreamSettings settings = gateway::defaultStreamSettings();
     std::optional<int> applicationId;
+    std::optional<std::string> wakeOnLanMacAddress;
     bool streamingActive = false;
+    // Guarded by streamMutex. Until authenticated, the connection may only authenticate
+    // or pair; the nonce is single-use.
+    bool authenticated = false;
+    std::string authenticationNonce;
 
     std::mutex sendMutex;
     std::mutex candidateMutex;
@@ -254,6 +302,8 @@ struct Session {
     bool videoTrackOpen = false;
     bool audioTrackOpen = false;
     bool stopRequested = false;
+    // Set when the stream ended on the host's side rather than at the TV's request.
+    std::optional<std::string> streamFailure;
     bool hostOperationActive = false;
     std::atomic<bool> videoKeyframeRequested = false;
     std::atomic<std::uint64_t> keyframeRequestCount = 0;
@@ -304,7 +354,10 @@ public:
             if (!moonlightOptions_.host) {
                 moonlightOptions_.host = identity_->configuredSunshineHost();
             }
+            tvClients_ = std::make_unique<gateway::tvauth::TvClientStore>(
+                identity_->storageDirectory() / "tv-clients.json");
             log("Moonlight source selected");
+            log("Paired TVs: " + std::to_string(tvClients_->count()));
             log("Moonlight identity path: " + identity_->storageDirectory().string());
         }
         log("WebSocket signaling server listening on 0.0.0.0:8000");
@@ -327,16 +380,142 @@ public:
 
     void wait(gateway::GatewayShutdownSignal& shutdown)
     {
+        auto nextSunshineCheck = std::chrono::steady_clock::now();
+        int announcedAvailability = SunshineUnknown;
+        int announcedCodecModes = 0;
         while (!shutdown.requested()) {
             if (ConsoleShutdownRequested) {
                 shutdown.request();
                 break;
+            }
+            if (std::chrono::steady_clock::now() >= nextSunshineCheck) {
+                refreshSunshineAvailability();
+                nextSunshineCheck = std::chrono::steady_clock::now() + SunshineAvailabilityInterval;
+            }
+            // Announced from here rather than where the change is recorded, because that can
+            // be in the middle of answering a TV and this thread holds no session locks.
+            const int availability = sunshineAvailability_.load();
+            const int codecModes = sunshineCodecModes_.load();
+            if (availability != SunshineUnknown && availability != announcedAvailability) {
+                announcedAvailability = availability;
+                announcedCodecModes = codecModes;
+                announceSunshineAvailability(availability == SunshineAvailable);
+            } else if (availability == SunshineAvailable && codecModes != announcedCodecModes) {
+                // Sunshine restarted between checks and came back with other encoders,
+                // e.g. a hardware encoder that failed its startup probe the first time.
+                announcedCodecModes = codecModes;
+                announceSunshineCodecs();
             }
             shutdown.waitFor(std::chrono::milliseconds(200));
         }
     }
 
 private:
+    // A TV's reachability probe never authenticates, so it cannot ask for gateway-status.
+    // The greeting it does receive carries this cached answer instead, kept fresh here
+    // rather than measured per connection so that the greeting is never delayed by it.
+    static constexpr auto SunshineAvailabilityInterval = std::chrono::seconds(5);
+    enum SunshineAvailability : int { SunshineUnknown, SunshineUnavailable, SunshineAvailable };
+
+    gateway::protocol::EncoderSupport sunshineEncoders() const
+    {
+        const int modes = sunshineCodecModes_.load();
+        return {(modes & SCM_AV1_MAIN8) != 0,
+                (modes & SCM_AV1_MAIN8) != 0 && (modes & SCM_AV1_MAIN10) != 0};
+    }
+
+    std::optional<bool> knownSunshineAvailability() const
+    {
+        switch (sunshineAvailability_.load()) {
+        case SunshineAvailable:
+            return true;
+        case SunshineUnavailable:
+            return false;
+        default:
+            return std::nullopt;
+        }
+    }
+
+    void recordSunshineAvailability(bool available)
+    {
+        const int next = available ? SunshineAvailable : SunshineUnavailable;
+        if (sunshineAvailability_.exchange(next) != next) {
+            log(available ? "Sunshine is available" : "Sunshine is unavailable");
+        }
+    }
+
+    void refreshSunshineAvailability()
+    {
+        if (sourceMode_ == MediaSourceMode::Test) {
+            recordSunshineAvailability(true);
+            return;
+        }
+        try {
+            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+                *identity_, configuredMoonlightOptions().host, {});
+            // Stored first so that a change in availability is announced with these codecs.
+            sunshineCodecModes_.store(detected.serverInfo.serverCodecModeSupport);
+            recordSunshineAvailability(
+                detected.pairedHost.has_value() && detected.serverInfo.pairStatus == 1);
+        } catch (const std::exception&) {
+            recordSunshineAvailability(false);
+        }
+    }
+
+    // Unauthenticated connections are TVs watching this Gateway from their home screen.
+    // The authenticated TV gets a full status, and the application list once Sunshine is
+    // back, since a list requested while Sunshine was down came back as an error.
+    void announceSunshineAvailability(bool available)
+    {
+        std::vector<std::shared_ptr<Session>> watchers;
+        std::shared_ptr<Session> active;
+        {
+            const std::lock_guard lock(sessionMutex_);
+            watchers = pendingSessions_;
+            active = activeSession_;
+        }
+        const auto message = gateway::protocol::makeSunshineAvailability(available);
+        for (const auto& watcher : watchers) {
+            try {
+                sendJson(watcher, message);
+            } catch (const std::exception& error) {
+                log("Sunshine availability not sent: " + std::string(error.what()));
+            }
+        }
+        if (!active) {
+            return;
+        }
+        try {
+            if (available) {
+                // The codecs Sunshine offers are only known once it answers.
+                sendJson(active, gateway::protocol::makeCapabilities(sunshineEncoders()));
+                reconcileApplications(active);
+            } else {
+                sendJson(active, gateway::protocol::makeGatewayStatus(gatewayStatus(active)));
+            }
+        } catch (const std::exception& error) {
+            log("Sunshine availability not sent: " + std::string(error.what()));
+        }
+    }
+
+    void announceSunshineCodecs()
+    {
+        std::shared_ptr<Session> active;
+        {
+            const std::lock_guard lock(sessionMutex_);
+            active = activeSession_;
+        }
+        log("Sunshine codec support changed");
+        if (!active) {
+            return;
+        }
+        try {
+            sendJson(active, gateway::protocol::makeCapabilities(sunshineEncoders()));
+        } catch (const std::exception& error) {
+            log("Sunshine codecs not sent: " + std::string(error.what()));
+        }
+    }
+
     static rtc::WebSocketServer::Configuration makeServerConfiguration()
     {
         rtc::WebSocketServer::Configuration configuration;
@@ -358,22 +537,44 @@ private:
         auto session = std::make_shared<Session>();
         session->socket = std::move(socket);
 
-        std::shared_ptr<Session> previousSession;
+        // A connection that has not authenticated must not displace the TV that may be
+        // streaming, so it waits beside the active session until it authenticates.
+        std::shared_ptr<Session> evictedSession;
         {
             const std::lock_guard lock(sessionMutex_);
-            previousSession = std::exchange(activeSession_, session);
+            if (pendingSessions_.size() >= MaxPendingTvConnections) {
+                evictedSession = pendingSessions_.front();
+                pendingSessions_.erase(pendingSessions_.begin());
+            }
+            pendingSessions_.push_back(session);
         }
 
-        if (previousSession && previousSession->socket) {
-            previousSession->socket->close();
+        if (evictedSession && evictedSession->socket) {
+            evictedSession->socket->close();
         }
 
         const std::weak_ptr<Session> weakSession = session;
 
         session->socket->onOpen([this, weakSession] {
             if (const auto currentSession = weakSession.lock()) {
-                log("WebSocket client connected");
-                sendInitialState(currentSession);
+                resolveWakeOnLanAddress(currentSession);
+                if (!tvClients_) {
+                    // The test source has no data directory to keep paired TVs in.
+                    log("WebSocket client connected (test source: authentication disabled)");
+                    promoteSession(currentSession);
+                    return;
+                }
+                log("WebSocket client connected; awaiting TV authentication");
+                std::string nonce = gateway::tvauth::randomHex(gateway::tvauth::NonceBytes);
+                std::optional<std::string> macAddress;
+                {
+                    const std::lock_guard lock(currentSession->streamMutex);
+                    currentSession->authenticationNonce = nonce;
+                    macAddress = currentSession->wakeOnLanMacAddress;
+                }
+                sendJson(currentSession,
+                         gateway::protocol::makeAuthRequired(
+                             nonce, macAddress, knownSunshineAvailability()));
             }
         });
 
@@ -619,6 +820,8 @@ private:
         if (settings.codec == gateway::VideoCodec::HEVC) {
             video.addH265Codec(
                 VideoPayloadType, gateway::hevcFormatParameters(settings));
+        } else if (settings.codec == gateway::VideoCodec::AV1) {
+            video.addAV1Codec(VideoPayloadType);
         } else {
             video.addH264Codec(VideoPayloadType);
         }
@@ -773,8 +976,14 @@ private:
             *identity_,
             std::move(options),
             [this](const std::string& message) { log(message); },
-            [weakSession = std::weak_ptr<Session>(session)] {
+            [weakSession = std::weak_ptr<Session>(session)](const std::string& reason) {
                 if (const auto currentSession = weakSession.lock()) {
+                    {
+                        const std::lock_guard lock(currentSession->streamMutex);
+                        if (!currentSession->stopRequested) {
+                            currentSession->streamFailure = reason;
+                        }
+                    }
                     currentSession->requestStreamingStop();
                 }
             },
@@ -823,12 +1032,19 @@ private:
 
         session->inputBridge->setMoonlightSessionActive(false);
         moonlightSession->stop();
+        std::optional<std::string> streamFailure;
         {
             const std::lock_guard lock(session->streamMutex);
             session->streamingActive = false;
             session->moonlightSession.reset();
+            streamFailure = std::exchange(session->streamFailure, std::nullopt);
         }
         log("Moonlight streaming stopped");
+        // Without this the TV kept showing the last frame and sending controller input
+        // that no longer reached Sunshine; "error" makes it end the session.
+        if (streamFailure) {
+            sendSessionStatus(session, "error", *streamFailure);
+        }
     }
 
     void streamTestMedia(Session& session)
@@ -969,6 +1185,18 @@ private:
         log("Audio streaming stopped");
     }
 
+    void resolveWakeOnLanAddress(const std::shared_ptr<Session>& session)
+    {
+        const auto peerAddress = session->socket->remoteAddress();
+        auto macAddress = peerAddress
+            ? gateway::platform::wakeOnLanMacAddressForPeer(*peerAddress)
+            : std::nullopt;
+        log(macAddress ? "Wake-on-LAN address for this client: " + *macAddress
+                       : std::string("Wake-on-LAN address unavailable for this client"));
+        const std::lock_guard lock(session->streamMutex);
+        session->wakeOnLanMacAddress = std::move(macAddress);
+    }
+
     gateway::protocol::GatewayStatus gatewayStatus(
         const std::shared_ptr<Session>& session)
     {
@@ -976,6 +1204,7 @@ private:
         {
             const std::lock_guard lock(session->streamMutex);
             status.sessionActive = session->sessionId != 0;
+            status.macAddress = session->wakeOnLanMacAddress;
         }
 
         if (sourceMode_ == MediaSourceMode::Test) {
@@ -990,6 +1219,8 @@ private:
             status.sunshineDetected = true;
             status.sunshinePaired = detected.pairedHost.has_value()
                 && detected.serverInfo.pairStatus == 1;
+            sunshineCodecModes_.store(detected.serverInfo.serverCodecModeSupport);
+            recordSunshineAvailability(status.sunshinePaired);
             if (!detected.serverInfo.hostname.empty()) {
                 status.gatewayName = detected.serverInfo.hostname;
             }
@@ -999,6 +1230,7 @@ private:
             }
         } catch (const std::exception& error) {
             log("Sunshine status unavailable: " + std::string(error.what()));
+            recordSunshineAvailability(false);
         }
         return status;
     }
@@ -1017,7 +1249,7 @@ private:
             throw std::runtime_error("Moonlight WebRTC Gateway is not paired with Sunshine");
         }
 
-        gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+        gateway::moonlight::SunshineHttpClient client(*identity_, detected.address, detected.httpPort);
         client.setHttpsPort(detected.serverInfo.httpsPort);
         client.setPinnedServerCertificate(
             detected.pairedHost->serverCertificatePem);
@@ -1062,7 +1294,7 @@ private:
             }
             hostId = detected.serverInfo.uniqueId;
 
-            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address, detected.httpPort);
             client.setHttpsPort(detected.serverInfo.httpsPort);
             client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
             auto applications = client.getAppList();
@@ -1124,9 +1356,24 @@ public:
         if (sourceMode_ != MediaSourceMode::Moonlight) {
             return {false, "unsupported-source", "Sunshine management requires the Moonlight source"};
         }
+        if (command.type == gateway::managementipc::CommandType::PairTv) {
+            try {
+                const std::string pin = openTvPairing();
+                return {true, "tv-pairing-open", "Enter this PIN on the TV within two minutes", pin};
+            } catch (const std::exception&) {
+                return {false, "tv-pairing-failed", "TV pairing could not be started"};
+            }
+        }
+        if (command.type == gateway::managementipc::CommandType::PairTvStatus) {
+            return tvPairingStatus();
+        }
+        if (command.type == gateway::managementipc::CommandType::UnpairTvs) {
+            return forgetTvs();
+        }
         if (command.type == gateway::managementipc::CommandType::SetHost) {
-            if (!gateway::moonlight::MoonlightIdentity::isValidSunshineHost(command.host)) {
-                return {false, "invalid-host", "Enter a hostname or IPv4 address without a URL or port"};
+            if (!gateway::moonlight::MoonlightIdentity::isValidSunshineEndpoint(command.host)) {
+                return {false, "invalid-host",
+                        "Enter a hostname or IPv4 address without a URL, optionally followed by :port"};
             }
             try {
                 identity_->saveConfiguredSunshineHost(command.host);
@@ -1158,28 +1405,105 @@ public:
         if (command.type != gateway::managementipc::CommandType::Test) {
             return {false, "unsupported-command", "Unsupported Sunshine management command"};
         }
+        // Test the address the request carries so the button reports on what the user
+        // typed. Testing only the saved value made an unsaved host look unreachable.
+        std::optional<std::string> testedHost = configuredMoonlightOptions().host;
+        if (!command.host.empty()) {
+            if (!gateway::moonlight::MoonlightIdentity::isValidSunshineEndpoint(command.host)) {
+                return {false, "invalid-host",
+                        "Enter a hostname or IPv4 address without a URL, optionally followed by :port"};
+            }
+            testedHost = command.host;
+        }
+
         try {
             const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
-                *identity_, configuredMoonlightOptions().host, [](const std::string&) {});
+                *identity_, testedHost, [](const std::string&) {});
             if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
                 return {false, "not-paired", "Sunshine is reachable but this Gateway is not paired"};
             }
-            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address, detected.httpPort);
             client.setHttpsPort(detected.serverInfo.httpsPort);
             client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
             (void)client.getServerInfo(true, std::chrono::seconds(5));
             return {true, "reachable", "Sunshine is reachable and its pinned TLS connection succeeded"};
         } catch (const std::exception& error) {
-            const std::string detail = error.what();
-            const bool tls = detail.find("certificate") != std::string::npos
-                || detail.find("SSL") != std::string::npos || detail.find("TLS") != std::string::npos;
-            const bool protocol = detail.find("XML") != std::string::npos
-                || detail.find("status") != std::string::npos;
-            return {false, tls ? "tls-pinning-failed" : protocol ? "protocol-failed" : "unreachable",
-                    tls ? "Sunshine TLS or certificate pinning failed" : protocol
-                        ? "Sunshine responded with an invalid protocol response"
-                        : "Sunshine is unreachable"};
+            return classifySunshineDetectionFailure(error);
         }
+    }
+
+    // Opens the two-minute window in which a TV may pair. The PIN is returned to the
+    // caller for display and is never logged.
+    std::string openTvPairing()
+    {
+        if (!tvClients_) {
+            throw std::runtime_error("TV pairing requires the Moonlight source");
+        }
+        std::string pin;
+        {
+            const std::lock_guard lock(tvPairingMutex_);
+            pin = tvPairing_.open(gateway::tvauth::TvPairingWindow::Clock::now());
+        }
+        log("TV pairing opened for two minutes");
+        return pin;
+    }
+
+    gateway::managementipc::Result tvPairingStatus()
+    {
+        gateway::tvauth::PairingState state;
+        {
+            const std::lock_guard lock(tvPairingMutex_);
+            state = tvPairing_.state(gateway::tvauth::TvPairingWindow::Clock::now());
+        }
+        switch (state) {
+        case gateway::tvauth::PairingState::Waiting:
+            return {false, "tv-pairing-waiting", "Waiting for the TV to enter the PIN"};
+        case gateway::tvauth::PairingState::Paired:
+            return {true, "tv-paired", "The TV was paired"};
+        case gateway::tvauth::PairingState::Expired:
+            return {false, "tv-pairing-expired", "The PIN expired before a TV used it"};
+        case gateway::tvauth::PairingState::Failed:
+            return {false, "tv-pairing-locked", "Too many incorrect PINs were entered on the TV"};
+        case gateway::tvauth::PairingState::Idle:
+            break;
+        }
+        return {false, "tv-pairing-idle", "No TV pairing is active"};
+    }
+
+    // Revokes every TV, including the one connected now: forgetting a lost TV has to
+    // cut it off, not just stop it reconnecting later.
+    gateway::managementipc::Result forgetTvs()
+    {
+        if (!tvClients_) {
+            return {false, "unsupported-source", "TV pairing requires the Moonlight source"};
+        }
+        std::size_t removed = 0;
+        try {
+            removed = tvClients_->removeAll();
+        } catch (const std::exception& error) {
+            log("Paired TVs could not be removed: " + std::string(error.what()));
+            return {false, "tv-unpair-failed", "Paired TVs could not be removed"};
+        }
+        {
+            const std::lock_guard lock(tvPairingMutex_);
+            tvPairing_.close();
+        }
+        std::vector<std::shared_ptr<Session>> sessions;
+        {
+            const std::lock_guard lock(sessionMutex_);
+            sessions = pendingSessions_;
+            if (activeSession_) {
+                sessions.push_back(activeSession_);
+            }
+        }
+        for (const auto& session : sessions) {
+            if (session->socket) {
+                session->socket->close();
+            }
+        }
+        log("Removed " + std::to_string(removed) + " paired TV(s)");
+        return {true, "tvs-unpaired", removed == 1 ? "1 TV was removed"
+                                                    : std::to_string(removed) + " TVs were removed"};
     }
 
     gateway::serviceipc::StatusSnapshot localServiceStatus()
@@ -1199,6 +1523,10 @@ public:
             snapshot.connectedTvClients = 0;
         }
 
+        if (tvClients_) {
+            snapshot.pairedTvClients = static_cast<std::uint32_t>(tvClients_->count());
+        }
+
         if (sourceMode_ == MediaSourceMode::Test) {
             return snapshot;
         }
@@ -1214,8 +1542,11 @@ public:
             snapshot.sunshineConnected = true;
             snapshot.sunshinePaired = detected.pairedHost.has_value()
                 && detected.serverInfo.pairStatus == 1;
+            // Report the server name separately. Overwriting the configured address with
+            // it fed Sunshine's display name back into the tray's address box, so saving
+            // that page stored a name no resolver can answer for.
             if (!detected.serverInfo.hostname.empty()) {
-                snapshot.sunshineHost = detected.serverInfo.hostname;
+                snapshot.sunshineName = detected.serverInfo.hostname;
             }
             const int runningAppId = runningSunshineApplicationId(detected.serverInfo);
             if (runningAppId != 0) {
@@ -1247,16 +1578,25 @@ private:
         }
         if (joinFinishedPairing) pairingThread_.join();
 
+        // Classify detection separately. A single catch around the whole body reported
+        // PIN generation and thread-start failures as "Sunshine is unreachable", which
+        // pointed the user at the network for a fault that was never there.
+        gateway::moonlight::DetectedSunshine detected;
         try {
-            const auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
+            detected = gateway::moonlight::MoonlightSession::detectSunshine(
                 *identity_, configuredMoonlightOptions().host, [](const std::string&) {});
-            if (detected.pairedHost && detected.serverInfo.pairStatus == 1) {
-                return {false, "already-paired", "This Gateway is already paired with Sunshine"};
-            }
-            if (detected.serverInfo.pairStatus == 1) {
-                return {false, "pairing-state-unknown", "Sunshine reports pairing but local trust is unavailable; pairing was not replaced"};
-            }
+        } catch (const std::exception& error) {
+            return classifySunshineDetectionFailure(error);
+        }
 
+        if (detected.pairedHost && detected.serverInfo.pairStatus == 1) {
+            return {false, "already-paired", "This Gateway is already paired with Sunshine"};
+        }
+        if (detected.serverInfo.pairStatus == 1) {
+            return {false, "pairing-state-unknown", "Sunshine reports pairing but local trust is unavailable; pairing was not replaced"};
+        }
+
+        try {
             const std::string pin = gateway::moonlight::MoonlightPairing::generatePin();
             {
                 std::lock_guard lock(pairingMutex_);
@@ -1266,7 +1606,7 @@ private:
             pairingThread_ = std::thread([this, detected, pin] {
                 gateway::managementipc::Result result;
                 try {
-                    gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+                    gateway::moonlight::SunshineHttpClient client(*identity_, detected.address, detected.httpPort);
                     client.setHttpsPort(detected.serverInfo.httpsPort);
                     gateway::moonlight::MoonlightPairing pairing(*identity_, client);
                     const auto outcome = pairing.pair(detected.serverInfo.appVersion, pin);
@@ -1279,7 +1619,8 @@ private:
                     } else {
                         gateway::moonlight::PairedSunshineHost host{
                             detected.serverInfo.uniqueId, detected.serverInfo.hostname, detected.address,
-                            detected.serverInfo.httpsPort, outcome.serverCertificatePem};
+                            detected.serverInfo.httpsPort, outcome.serverCertificatePem,
+                            detected.httpPort};
                         identity_->savePairedHost(host);
                         client.setPinnedServerCertificate(outcome.serverCertificatePem);
                         const auto verified = client.getServerInfo(true, std::chrono::seconds(5));
@@ -1298,7 +1639,11 @@ private:
             });
             return {true, "pairing-started", "Enter this PIN in Sunshine to continue pairing", pin};
         } catch (const std::exception&) {
-            return {false, "unreachable", "Sunshine is unreachable"};
+            {
+                std::lock_guard lock(pairingMutex_);
+                pairingInProgress_ = false;
+            }
+            return {false, "pairing-start-failed", "Sunshine was reached but pairing could not be started"};
         }
     }
 
@@ -1319,7 +1664,7 @@ private:
             if (!detected.pairedHost || detected.serverInfo.pairStatus != 1) {
                 return {false, "not-paired", "This Gateway is not paired with Sunshine"};
             }
-            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address, detected.httpPort);
             client.setHttpsPort(detected.serverInfo.httpsPort);
             client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
             if (!identity_->removePairedHost(detected.serverInfo.uniqueId)) {
@@ -1340,8 +1685,9 @@ private:
 
     void sendInitialState(const std::shared_ptr<Session>& session)
     {
+        // The status is fetched first because it refreshes the codecs Sunshine advertises.
         sendJson(session, gateway::protocol::makeGatewayStatus(gatewayStatus(session)));
-        sendJson(session, gateway::protocol::makeCapabilities());
+        sendJson(session, gateway::protocol::makeCapabilities(sunshineEncoders()));
         sendJson(session, gateway::protocol::makeSessionStatus("idle"));
     }
 
@@ -1483,6 +1829,7 @@ private:
             session->videoTrackOpen = false;
             session->audioTrackOpen = false;
             session->stopRequested = false;
+            session->streamFailure.reset();
             session->streamingActive = false;
         }
         {
@@ -1637,7 +1984,7 @@ private:
                 throw std::runtime_error("Moonlight WebRTC Gateway is not paired with Sunshine");
             }
 
-            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address);
+            gateway::moonlight::SunshineHttpClient client(*identity_, detected.address, detected.httpPort);
             client.setHttpsPort(detected.serverInfo.httpsPort);
             client.setPinnedServerCertificate(detected.pairedHost->serverCertificatePem);
 
@@ -1717,6 +2064,37 @@ private:
     {
         try {
             const auto message = gateway::protocol::parseClientMessage(text);
+            bool authenticated = false;
+            {
+                const std::lock_guard lock(session->streamMutex);
+                authenticated = session->authenticated;
+            }
+            if (const auto* authenticate =
+                    std::get_if<gateway::protocol::AuthenticateRequest>(&message.payload)) {
+                if (authenticated) {
+                    sendJson(session, gateway::protocol::makeError(
+                        message.type, "already-authenticated", "This TV is already authenticated"));
+                } else {
+                    authenticateTv(session, *authenticate);
+                }
+                return;
+            }
+            if (const auto* pair =
+                    std::get_if<gateway::protocol::PairClientRequest>(&message.payload)) {
+                if (authenticated) {
+                    sendJson(session, gateway::protocol::makeError(
+                        message.type, "already-authenticated", "This TV is already paired"));
+                } else {
+                    pairTv(session, *pair);
+                }
+                return;
+            }
+            if (!authenticated) {
+                sendJson(session, gateway::protocol::makeError(
+                    message.type, "not-authenticated", "Pair this TV with the Gateway first"));
+                return;
+            }
+
             if (std::holds_alternative<gateway::protocol::GetAppsRequest>(
                     message.payload)) {
                 sendApplications(session);
@@ -1790,7 +2168,10 @@ private:
             return;
         }
         if (session->settings.hdr) {
-            if (const auto levelId = gateway::hevcLevelId(sdp, VideoPayloadType)) {
+            const bool av1 = session->settings.codec == gateway::VideoCodec::AV1;
+            if (av1) {
+                // AV1 Main covers 10-bit, so the answer carries no profile to check.
+            } else if (const auto levelId = gateway::hevcLevelId(sdp, VideoPayloadType)) {
                 log("Tizen HEVC Main10 answer level-id=" + std::to_string(*levelId));
                 const int offeredLevel = session->settings.width == 3840 ? 153 : 123;
                 if (*levelId < offeredLevel) {
@@ -1808,7 +2189,8 @@ private:
                 gateway::disableRtpColorSpace(session->videoRtpConfiguration);
                 log("WebRTC RTP HDR color-space extension: NEGOTIATED BUT DISABLED for Tizen decoder compatibility, id="
                     + std::to_string(*colorSpaceId)
-                    + "; relying on HEVC VUI/SEI metadata");
+                    + (av1 ? "; relying on the AV1 sequence header colour config and metadata OBUs"
+                           : "; relying on HEVC VUI/SEI metadata"));
             } else {
                 gateway::disableRtpColorSpace(session->videoRtpConfiguration);
                 log("WebRTC RTP HDR color-space extension: NOT NEGOTIATED");
@@ -1879,9 +2261,106 @@ private:
         stopActiveSession(session, false);
 
         const std::lock_guard lock(sessionMutex_);
+        std::erase(pendingSessions_, session);
         if (activeSession_ == session) {
             activeSession_.reset();
         }
+    }
+
+    // Makes an authenticated connection the active TV, closing the one it replaces.
+    // Returns false when the connection closed or was evicted before it got here.
+    bool promoteSession(const std::shared_ptr<Session>& session)
+    {
+        std::shared_ptr<Session> previousSession;
+        {
+            const std::lock_guard lock(sessionMutex_);
+            const auto pending = std::find(pendingSessions_.begin(), pendingSessions_.end(), session);
+            if (pending == pendingSessions_.end()) {
+                return false;
+            }
+            pendingSessions_.erase(pending);
+            previousSession = std::exchange(activeSession_, session);
+        }
+        {
+            const std::lock_guard lock(session->streamMutex);
+            session->authenticated = true;
+            session->authenticationNonce.clear();
+        }
+        if (previousSession && previousSession->socket) {
+            previousSession->socket->close();
+        }
+        sendInitialState(session);
+        return true;
+    }
+
+    void authenticateTv(const std::shared_ptr<Session>& session,
+                        const gateway::protocol::AuthenticateRequest& request)
+    {
+        std::string nonce;
+        {
+            const std::lock_guard lock(session->streamMutex);
+            nonce = std::exchange(session->authenticationNonce, {});
+        }
+        const auto client = tvClients_ ? tvClients_->find(request.clientId) : std::nullopt;
+        if (nonce.empty() || !client
+            || !gateway::tvauth::constantTimeEquals(
+                gateway::tvauth::authenticationProof(client->secret, nonce), request.proof)) {
+            log("TV authentication rejected");
+            sendJson(session, gateway::protocol::makeError(
+                "authenticate", "authentication-failed",
+                "This TV is not paired with the Gateway"));
+            return;
+        }
+        log("TV authenticated: " + client->name);
+        sendJson(session, gateway::protocol::makeAuthenticated());
+        promoteSession(session);
+    }
+
+    void pairTv(const std::shared_ptr<Session>& session,
+                const gateway::protocol::PairClientRequest& request)
+    {
+        if (!tvClients_) {
+            sendJson(session, gateway::protocol::makeError(
+                "pair-client", "pairing-unavailable", "This Gateway does not pair TVs"));
+            return;
+        }
+        gateway::tvauth::PairingAttempt outcome;
+        {
+            const std::lock_guard lock(tvPairingMutex_);
+            outcome = tvPairing_.attempt(request.pin, gateway::tvauth::TvPairingWindow::Clock::now());
+        }
+        if (outcome == gateway::tvauth::PairingAttempt::NotOpen) {
+            sendJson(session, gateway::protocol::makeError(
+                "pair-client", "pairing-not-open",
+                "Choose Pair TV in Moonlight WebRTC on the PC, then enter the PIN it shows"));
+            return;
+        }
+        if (outcome == gateway::tvauth::PairingAttempt::IncorrectPin) {
+            log("TV pairing: incorrect PIN");
+            sendJson(session, gateway::protocol::makeError(
+                "pair-client", "incorrect-pin", "Incorrect PIN. Check the PIN shown on the PC"));
+            return;
+        }
+        if (outcome == gateway::tvauth::PairingAttempt::TooManyAttempts) {
+            log("TV pairing closed after too many incorrect PINs");
+            sendJson(session, gateway::protocol::makeError(
+                "pair-client", "too-many-attempts",
+                "Too many incorrect PINs. Start pairing again on the PC"));
+            return;
+        }
+
+        gateway::tvauth::TvClient client;
+        try {
+            client = tvClients_->add(request.clientName);
+        } catch (const std::exception& error) {
+            log("TV pairing could not be saved: " + std::string(error.what()));
+            sendJson(session, gateway::protocol::makeError(
+                "pair-client", "pairing-failed", "The Gateway could not save this TV"));
+            return;
+        }
+        log("TV paired: " + client.name);
+        sendJson(session, gateway::protocol::makePaired(client.id, client.secret));
+        promoteSession(session);
     }
 
     MediaSourceMode sourceMode_;
@@ -1898,11 +2377,18 @@ private:
     std::mutex logMutex_;
     std::mutex sessionMutex_;
     std::shared_ptr<Session> activeSession_;
+    std::vector<std::shared_ptr<Session>> pendingSessions_;
+    std::unique_ptr<gateway::tvauth::TvClientStore> tvClients_;
+    std::mutex tvPairingMutex_;
+    gateway::tvauth::TvPairingWindow tvPairing_;
     std::mutex pairingMutex_;
     std::thread pairingThread_;
     bool pairingInProgress_ = false;
     gateway::managementipc::Result pairingResult_{false, "not-started", "No pairing operation is active"};
     std::atomic<std::uint64_t> nextSessionId_ = 1;
+    std::atomic<int> sunshineAvailability_ = SunshineUnknown;
+    // Sunshine's ServerCodecModeSupport bits from its last answer; 0 until it has answered.
+    std::atomic<int> sunshineCodecModes_ = 0;
     rtc::WebSocketServer server_;
 
 };
@@ -1923,7 +2409,7 @@ int runMoonlightPairing(const ProgramOptions& options)
     auto detected = gateway::moonlight::MoonlightSession::detectSunshine(
         identity, options.host, logger);
     auto httpClient = std::make_unique<gateway::moonlight::SunshineHttpClient>(
-        identity, detected.address);
+        identity, detected.address, detected.httpPort);
     httpClient->setHttpsPort(detected.serverInfo.httpsPort);
     if (detected.pairedHost) {
         httpClient->setPinnedServerCertificate(
@@ -1959,6 +2445,7 @@ int runMoonlightPairing(const ProgramOptions& options)
             detected.address,
             detected.serverInfo.httpsPort,
             outcome.serverCertificatePem,
+            detected.httpPort,
         };
         identity.savePairedHost(host);
         detected.pairedHost = host;
@@ -2073,6 +2560,13 @@ int runGatewayRuntime(const ProgramOptions& options,
                       const gateway::WindowsServiceHost::ReadyCallback& ready)
 {
     SignalingServer server(options, std::ref(logger));
+    if (options.pairTv) {
+        // Printed, not logged: the PIN must not reach the log file. Opening logs a line,
+        // so the PIN is fetched first to keep that line out of this one.
+        const std::string pin = server.openTvPairing();
+        std::cout << "TV pairing PIN: " << pin
+                  << " (enter it on the TV within two minutes)" << std::endl;
+    }
     std::unique_ptr<gateway::serviceipc::ServiceIpcServer> serviceIpc;
     std::unique_ptr<gateway::managementipc::ManagementIpcClient> managementIpc;
     if (options.hostMode == ProgramHostMode::Service) {

@@ -24,6 +24,9 @@ const char* commandName(CommandType command)
     case CommandType::Pair: return "pair";
     case CommandType::PairStatus: return "pair-status";
     case CommandType::Unpair: return "unpair";
+    case CommandType::PairTv: return "pair-tv";
+    case CommandType::PairTvStatus: return "pair-tv-status";
+    case CommandType::UnpairTvs: return "unpair-tvs";
     }
     throw std::invalid_argument("Unsupported management IPC command");
 }
@@ -40,17 +43,32 @@ Command parseCommand(std::string_view payload)
         }
         return {CommandType::SetHost, value.at("host").get<std::string>()};
     }
-    if (type == "test" && value.size() == 2) return {CommandType::Test, {}};
+    if (type == "test") {
+        // The tray sends whatever is in its host box so a test reflects what the user
+        // typed rather than the last saved value. An omitted host tests the saved
+        // configuration, which is what an older tray does.
+        if (value.size() == 2) return {CommandType::Test, {}};
+        if (value.size() == 3 && value.contains("host") && value.at("host").is_string()) {
+            return {CommandType::Test, value.at("host").get<std::string>()};
+        }
+        throw std::invalid_argument("Invalid test management request");
+    }
     if (type == "pair" && value.size() == 2) return {CommandType::Pair, {}};
     if (type == "pair-status" && value.size() == 2) return {CommandType::PairStatus, {}};
     if (type == "unpair" && value.size() == 2) return {CommandType::Unpair, {}};
+    if (type == "pair-tv" && value.size() == 2) return {CommandType::PairTv, {}};
+    if (type == "pair-tv-status" && value.size() == 2) return {CommandType::PairTvStatus, {}};
+    if (type == "unpair-tvs" && value.size() == 2) return {CommandType::UnpairTvs, {}};
     throw std::invalid_argument("Unsupported management IPC command");
 }
 
 std::string makeCommand(const Command& command)
 {
     Json value{{"version", ProtocolVersion}, {"type", commandName(command.type)}};
-    if (command.type == CommandType::SetHost) value["host"] = command.host;
+    if (command.type == CommandType::SetHost
+        || (command.type == CommandType::Test && !command.host.empty())) {
+        value["host"] = command.host;
+    }
     return value.dump();
 }
 

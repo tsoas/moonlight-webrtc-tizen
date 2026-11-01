@@ -1,9 +1,25 @@
-const GATEWAY_PROTOCOL_VERSION = 1;
+const GATEWAY_PROTOCOL_VERSION = 2;
 const GAMEPAD_PROTOCOL_VERSION = 1;
 const GAMEPAD_POLL_INTERVAL_MS = 1000 / 120;
 const GAMEPAD_KEEPALIVE_INTERVAL_MS = 250;
-const preferences = ClientPreferences.create();
-const gatewayStore = GatewayStore.create();
+// Every persistent value goes through one storage object so that a TV which loses
+// localStorage writes on exit loses none of them rather than an arbitrary subset.
+const durableStorage = DurableStorage.create({
+  log: function (message) { log(message); },
+});
+const preferences = ClientPreferences.create(durableStorage);
+const gatewayStore = GatewayStore.create(durableStorage);
+const wakeOnLan = WakeOnLan.create({ log: function (message) { log(message); } });
+// How long a woken PC may take to boot and start the Gateway service before the TV gives up.
+const GATEWAY_WAKE_TIMEOUT_MS = 120000;
+// A sleeping PC never answers the TCP handshake, and the retransmissions back off to a minute
+// or more, so each attempt is cut short to reconnect promptly once the PC is up.
+const GATEWAY_WAKE_ATTEMPT_TIMEOUT_MS = 5000;
+// The resolution list is not static in the client: it is whatever the Gateway advertises,
+// and until the first "capabilities" message arrives the markup only offers 720p and 1080p.
+// Caching the last list means the modes the Gateway actually supports - 1440p and 4K
+// included - are on screen from the moment the app opens, not once it has connected.
+const CAPABILITIES_STORAGE_KEY = "moonlight-webrtc.client.capabilities.v1";
 
 const homeScreen = document.getElementById("home-screen");
 const streamingScreen = document.getElementById("streaming-screen");
@@ -25,6 +41,9 @@ const resolutionSelect = document.getElementById("resolution-select");
 const codecSelect = document.getElementById("codec-select");
 const hdrSelect = document.getElementById("hdr-select");
 const bitrateSelect = document.getElementById("bitrate-select");
+const interpolationSelect = document.getElementById("interpolation-select");
+const interpolationStatusElement = document.getElementById("interpolation-status");
+const interpolationCanvas = document.getElementById("interpolation-canvas");
 const settingsSelectorMenu = document.getElementById("settings-selector-menu");
 const settingsSelectorHeading = document.getElementById("settings-selector-heading");
 const settingsSelectorOptions = document.getElementById("settings-selector-options");
@@ -42,8 +61,16 @@ const gatewayOctetButtons = Array.prototype.slice.call(document.querySelectorAll
 const gatewayEditorError = document.getElementById("gateway-editor-error");
 const gatewayEditorCancelButton = document.getElementById("gateway-editor-cancel");
 const gatewayEditorConnectButton = document.getElementById("gateway-editor-connect");
+const gatewayPairDialog = document.getElementById("gateway-pair-dialog");
+const gatewayPairDigitButtons = Array.prototype.slice.call(document.querySelectorAll("[data-pin-index]"));
+const gatewayPairError = document.getElementById("gateway-pair-error");
+const gatewayPairInstructions = document.getElementById("gateway-pair-instructions");
+const gatewayPairHint = document.getElementById("gateway-pair-hint");
+const gatewayPairCancelButton = document.getElementById("gateway-pair-cancel");
+const gatewayPairConfirmButton = document.getElementById("gateway-pair-confirm");
 const gatewayContextMenu = document.getElementById("gateway-context-menu");
 const gatewayContextHeading = document.getElementById("gateway-context-heading");
+const gatewayWakeButton = document.getElementById("gateway-wake-button");
 const gatewayEditButton = document.getElementById("gateway-edit-button");
 const gatewayRemoveButton = document.getElementById("gateway-remove-button");
 const gatewayRemoveDialog = document.getElementById("gateway-remove-dialog");
@@ -70,6 +97,7 @@ const overlay = {
   hdr: document.getElementById("overlay-hdr"),
   gamepad: document.getElementById("overlay-gamepad"),
   connection: document.getElementById("overlay-connection"),
+  interpolation: document.getElementById("overlay-interpolation"),
 };
 
 const trackCounts = {
@@ -164,6 +192,9 @@ let videoModes = [];
 let codecSelectionWasIntentional = false;
 let updatingCodecOptions = false;
 let lastStatisticsConsoleTime = 0;
+let lastStatisticsSampleTime = 0;
+// Half the console-log period, so that log still lands on its own five-second schedule.
+const HIDDEN_STATISTICS_INTERVAL_MS = 2500;
 let applications = [];
 let ui = null;
 let artworkLoader = null;
@@ -178,12 +209,24 @@ let activeGateway = null;
 let pendingGatewayValidation = null;
 let gatewayValidationTimer = null;
 let gatewayEditorState = null;
+let gatewayPairState = null;
+// Sunshine pairs like Moonlight: this TV shows a PIN that the user enters in Sunshine's Web UI.
+// The standalone Gateway shows the PIN in its tray instead, for this TV to enter.
+let gatewayShowsTvPin = false;
+// Set once the Gateway accepts this TV on the current connection.
+let gatewayAuthorized = false;
 let gatewayContextGatewayId = null;
 let gatewayRemoveGatewayId = null;
 let gatewayConnectionToken = 0;
 let openApplicationsAfterConnection = false;
+// The Gateway being woken: { gatewayId, name, timer }. Its connection attempts are expected
+// to fail until the PC has booted, so they are reported as waiting rather than as errors.
+let gatewayWake = null;
 const gatewayRuntimeStates = new Map();
-const gatewayProbeIds = new Set();
+// Saved Gateway id -> { socket, greetingTimer, retryTimer, dropped }; see watchGateway.
+const gatewayWatchers = new Map();
+const GATEWAY_WATCH_GREETING_TIMEOUT_MS = 2500;
+const GATEWAY_WATCH_RETRY_MS = 5000;
 
 function log(message) {
   console.log(message);
@@ -228,10 +271,41 @@ function gatewayWebSocketUrl(gateway) {
   return "ws://" + gateway.host + ":" + String(gateway.port);
 }
 
+// The Gateway answers but cannot reach a paired Sunshine, so there is nothing to stream yet.
+const GATEWAY_SUNSHINE_UNAVAILABLE = "Sunshine unavailable";
+
+function gatewayIsAwake(state) {
+  return state === "Online" || state === GATEWAY_SUNSHINE_UNAVAILABLE;
+}
+
+// A Gateway that does not report Sunshine predates the field and is treated as Online.
+function reachableGatewayState(sunshineAvailable) {
+  return sunshineAvailable === false ? GATEWAY_SUNSHINE_UNAVAILABLE : "Online";
+}
+
 function gatewayEntries() {
   return savedGateways.map(function (gateway) {
-    return Object.assign({}, gateway, { state: gatewayRuntimeStates.get(gateway.id) || "Offline" });
+    const state = gatewayRuntimeStates.get(gateway.id) || "Offline";
+    return Object.assign({}, gateway, {
+      state: gatewayWakeIsActive(gateway.id) && !gatewayIsAwake(state) ? "Waking" : state,
+    });
   });
+}
+
+// The status message carries the MAC address of the Gateway adapter this TV reaches it
+// through; keeping it is what allows the TV to wake that PC once it is off.
+function gatewayWithStatus(gateway, message) {
+  const macAddress = WakeOnLan.normalizeMacAddress(message && message.macAddress);
+  return macAddress ? Object.assign({}, gateway, { macAddress: macAddress }) : Object.assign({}, gateway);
+}
+
+function learnGatewayMacAddress(gatewayId, message) {
+  const stored = gatewayStore.find(gatewayId);
+  const updated = stored ? gatewayWithStatus(stored, message) : null;
+  if (updated && updated.macAddress !== stored.macAddress) {
+    gatewayStore.upsert(updated);
+    savedGateways = gatewayStore.list();
+  }
 }
 
 function renderGateways() {
@@ -269,12 +343,12 @@ function resetGatewayData() {
   }
 }
 
-function refreshStoredGatewayName(message) {
+function refreshStoredGateway(message) {
   if (!activeGateway) {
     return;
   }
   const name = gatewayDisplayName(message);
-  const updated = gatewayStore.upsert(Object.assign({}, activeGateway, { name: name }));
+  const updated = gatewayStore.upsert(gatewayWithStatus(Object.assign({}, activeGateway, { name: name }), message));
   if (updated) {
     activeGateway = updated;
     savedGateways = gatewayStore.list();
@@ -330,11 +404,11 @@ function completeGatewayValidation(message) {
     return;
   }
   if (!pendingGatewayValidation) {
-    refreshStoredGatewayName(message);
+    refreshStoredGateway(message);
     return;
   }
   const pending = pendingGatewayValidation;
-  const candidate = Object.assign({}, activeGateway, { name: gatewayDisplayName(message) });
+  const candidate = gatewayWithStatus(Object.assign({}, activeGateway, { name: gatewayDisplayName(message) }), message);
   const saved = pending.mode === "edit"
     ? gatewayStore.replace(pending.previousId, candidate)
     : gatewayStore.upsert(candidate);
@@ -349,7 +423,7 @@ function completeGatewayValidation(message) {
   clearGatewayValidationTimeout();
   pendingGatewayValidation = null;
   // The candidate does not have a persistent ID until it is saved.
-  setGatewayRuntimeState(activeGateway.id, "Online");
+  setGatewayRuntimeState(activeGateway.id, reachableGatewayState(sunshineReady));
   closeGatewayEditor();
   if (ui) {
     ui.setActiveGateway(activeGateway);
@@ -407,12 +481,15 @@ function connectGateway(gateway) {
   }
 
   const token = ++gatewayConnectionToken;
+  gatewayAuthorized = false;
+  stopGatewayWatch(gateway.id);
   activeGateway = Object.assign({}, gateway);
   resetGatewayData();
   setGatewayRuntimeState(activeGateway.id, "Connecting");
 
   gatewayStateElement.textContent = "Connecting";
-  setHomeMessage("Connecting to Gateway...", false);
+  setHomeMessage(gatewayWakeIsActive(activeGateway.id)
+    ? "Waiting for " + gatewayWake.name + " to wake up..." : "Connecting to Gateway...", false);
   try {
     socket = new WebSocket(gatewayWebSocketUrl(activeGateway));
   } catch (error) {
@@ -422,31 +499,52 @@ function connectGateway(gateway) {
     return;
   }
 
+  let wakeAttemptTimer = null;
+  if (gatewayWakeIsActive(activeGateway.id)) {
+    const attemptSocket = socket;
+    wakeAttemptTimer = setTimeout(function () {
+      if (attemptSocket.readyState === WebSocket.CONNECTING) {
+        attemptSocket.close();
+      }
+    }, GATEWAY_WAKE_ATTEMPT_TIMEOUT_MS);
+  }
+
   socket.addEventListener("open", function () {
+    clearTimeout(wakeAttemptTimer);
     if (token !== gatewayConnectionToken) {
       return;
     }
     gatewayConnected = true;
-    gatewayStateElement.textContent = "Connected";
-    setHomeMessage("Connected. Loading Sunshine applications...", false);
+    gatewayStateElement.textContent = "Authenticating";
+    setHomeMessage("Connected. Authenticating with the Gateway...", false);
     updatePlayAvailability();
-    requestApplications();
     log("Gateway WebSocket connected");
-    showNotification("Gateway connected", gatewayAddress(), false);
   });
 
   socket.addEventListener("close", function () {
+    clearTimeout(wakeAttemptTimer);
     if (token !== gatewayConnectionToken) {
       return;
     }
     socket = null;
     gatewayConnected = false;
+    gatewayAuthorized = false;
+    closeGatewayPairDialog();
     sunshineReady = false;
     gatewayStateElement.textContent = "Disconnected";
     sunshineStateElement.textContent = "Unavailable";
     sessionState = "idle";
     sessionStateElement.textContent = "Idle";
     closePeerConnection();
+    // A PC that is still booting refuses connections; retry quietly, leaving the user where
+    // they are rather than returning them to the Gateway list on every attempt.
+    if (activeGateway && gatewayWakeIsActive(activeGateway.id)) {
+      setGatewayRuntimeState(activeGateway.id, "Offline");
+      setHomeMessage("Waiting for " + gatewayWake.name + " to wake up...", false);
+      updatePlayAvailability();
+      reconnectTimer = setTimeout(function () { connectGateway(activeGateway); }, 2000);
+      return;
+    }
     showHome();
     if (gatewayValidationFailed("Unable to connect to Gateway at " + gatewayAddress())) {
       return;
@@ -474,51 +572,111 @@ function connectGateway(gateway) {
   });
 }
 
-function probeGateway(gateway) {
-  if (!gateway || (activeGateway && activeGateway.id === gateway.id) || gatewayProbeIds.has(gateway.id)) {
+function stopGatewayWatch(gatewayId) {
+  const watcher = gatewayWatchers.get(String(gatewayId));
+  if (!watcher) {
     return;
   }
-  gatewayProbeIds.add(gateway.id);
-  setGatewayRuntimeState(gateway.id, "Connecting");
-  let resolved = false;
-  let probe = null;
-  let timeout = null;
-  const complete = function (state) {
-    if (resolved) {
-      return;
-    }
-    resolved = true;
-    gatewayProbeIds.delete(gateway.id);
-    if (timeout !== null) {
-      clearTimeout(timeout);
-    }
-    setGatewayRuntimeState(gateway.id, state);
-    if (probe && probe.readyState === WebSocket.OPEN) {
-      probe.close();
-    }
-  };
-  try {
-    probe = new WebSocket(gatewayWebSocketUrl(gateway));
-    timeout = setTimeout(function () { complete("Offline"); }, 2500);
-    probe.addEventListener("message", function (event) {
-      try {
-        const message = JSON.parse(event.data);
-        if (message.version === GATEWAY_PROTOCOL_VERSION && message.type === "gateway-status") {
-          complete("Online");
-        }
-      } catch (error) {
-        complete("Offline");
-      }
-    });
-    probe.addEventListener("error", function () { complete("Offline"); });
-    probe.addEventListener("close", function () { complete("Offline"); });
-  } catch (error) {
-    complete("Offline");
+  gatewayWatchers.delete(String(gatewayId));
+  clearTimeout(watcher.greetingTimer);
+  clearTimeout(watcher.retryTimer);
+  if (watcher.socket) {
+    watcher.socket.close();
   }
 }
 
+// Saved Gateways are watched rather than probed once. The connection stays open without
+// answering auth-required, so it never displaces a TV that is streaming, and the Gateway
+// pushes "sunshine-availability" on it whenever Sunshine starts or stops. A watch that
+// drops is retried, so a PC that comes back is noticed without leaving the screen.
+function watchGateway(gateway) {
+  if (!gateway || (activeGateway && activeGateway.id === gateway.id)) {
+    return;
+  }
+  const existing = gatewayWatchers.get(gateway.id);
+  if (existing && existing.socket) {
+    return;
+  }
+  // A watch waiting to retry is reconnected now: the screen has just been shown.
+  stopGatewayWatch(gateway.id);
+  const watcher = { socket: null, greetingTimer: null, retryTimer: null, dropped: false };
+  gatewayWatchers.set(gateway.id, watcher);
+  if (!gatewayRuntimeStates.has(gateway.id)) {
+    setGatewayRuntimeState(gateway.id, "Connecting");
+  }
+  const isCurrent = function () { return gatewayWatchers.get(gateway.id) === watcher; };
+  const scheduleRetry = function () {
+    watcher.retryTimer = setTimeout(function () {
+      if (!isCurrent()) {
+        return;
+      }
+      // Nothing is shown while streaming, so there is no reason to reconnect then.
+      if (homeScreen.hidden) {
+        scheduleRetry();
+        return;
+      }
+      gatewayWatchers.delete(gateway.id);
+      watchGateway(gatewayStore.find(gateway.id));
+    }, GATEWAY_WATCH_RETRY_MS);
+  };
+  const drop = function () {
+    if (watcher.dropped || !isCurrent()) {
+      return;
+    }
+    watcher.dropped = true;
+    watcher.socket = null;
+    clearTimeout(watcher.greetingTimer);
+    if (!gatewayStore.find(gateway.id) || (activeGateway && activeGateway.id === gateway.id)) {
+      gatewayWatchers.delete(gateway.id);
+      return;
+    }
+    setGatewayRuntimeState(gateway.id, "Offline");
+    scheduleRetry();
+  };
+  let socket;
+  try {
+    socket = new WebSocket(gatewayWebSocketUrl(gateway));
+  } catch (error) {
+    drop();
+    return;
+  }
+  watcher.socket = socket;
+  watcher.greetingTimer = setTimeout(function () {
+    socket.close();
+    drop();
+  }, GATEWAY_WATCH_GREETING_TIMEOUT_MS);
+  socket.addEventListener("message", function (event) {
+    if (!isCurrent()) {
+      return;
+    }
+    // The TV has since connected to this Gateway for real and gets its state from there.
+    if (activeGateway && activeGateway.id === gateway.id) {
+      stopGatewayWatch(gateway.id);
+      return;
+    }
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (error) {
+      return;
+    }
+    if (message.version !== GATEWAY_PROTOCOL_VERSION) {
+      return;
+    }
+    if (message.type === "auth-required") {
+      clearTimeout(watcher.greetingTimer);
+      learnGatewayMacAddress(gateway.id, message);
+      setGatewayRuntimeState(gateway.id, reachableGatewayState(message.sunshineAvailable));
+    } else if (message.type === "sunshine-availability") {
+      setGatewayRuntimeState(gateway.id, reachableGatewayState(message.sunshineAvailable));
+    }
+  });
+  socket.addEventListener("error", drop);
+  socket.addEventListener("close", drop);
+}
+
 function probeSavedGateways() {
-  savedGateways.forEach(probeGateway);
+  savedGateways.forEach(watchGateway);
 }
 
 async function handleGatewayMessage(text) {
@@ -530,12 +688,20 @@ async function handleGatewayMessage(text) {
     return;
   }
   if (message.version !== GATEWAY_PROTOCOL_VERSION || typeof message.type !== "string") {
-    reportError("Unsupported Gateway message", new Error("Protocol version 1 is required"));
+    rejectIncompatibleGateway(message.version);
     return;
   }
 
-  if (message.type === "gateway-status") {
+  if (message.type === "auth-required") {
+    handleAuthRequired(message);
+  } else if (message.type === "authenticated") {
+    log("Gateway accepted this TV");
+  } else if (message.type === "paired") {
+    handlePaired(message);
+  } else if (message.type === "gateway-status") {
     handleGatewayStatus(message);
+  } else if (message.type === "sunshine-availability") {
+    // Meant for watchers; an authenticated TV receives a full gateway-status as well.
   } else if (message.type === "capabilities") {
     applyCapabilities(message);
   } else if (message.type === "apps") {
@@ -559,7 +725,139 @@ async function handleGatewayMessage(text) {
   }
 }
 
+// A Gateway from before TV pairing speaks protocol version 1 and would serve anyone;
+// this client does not use it and says what to update instead of failing silently.
+function rejectIncompatibleGateway(version) {
+  const detail = typeof version === "number" && version < GATEWAY_PROTOCOL_VERSION
+    ? "This Gateway is out of date. Update Moonlight WebRTC on the PC."
+    : "This Gateway is newer than this TV app. Update Moonlight WebRTC Client.";
+  const gatewayId = activeGateway ? activeGateway.id : "";
+  closeActiveGatewayConnection();
+  setGatewayRuntimeState(gatewayId, "Update required");
+  if (!gatewayValidationFailed(detail)) {
+    showHome();
+    reportError("Incompatible Gateway", new Error(detail));
+  }
+}
+
+function activeGatewayCredentials() {
+  return activeGateway && GatewayAuth.isValidCredentials(activeGateway.clientId, activeGateway.clientSecret)
+    ? activeGateway : null;
+}
+
+// A Gateway being added is saved, credentials included, when its validation completes.
+function storeActiveGatewayCredentials(clientId, clientSecret) {
+  if (!activeGateway) {
+    return;
+  }
+  activeGateway = Object.assign({}, activeGateway, { clientId: clientId, clientSecret: clientSecret });
+  if (!clientId) {
+    delete activeGateway.clientId;
+    delete activeGateway.clientSecret;
+  }
+  if (gatewayStore.find(activeGateway.id)) {
+    activeGateway = gatewayStore.upsert(activeGateway) || activeGateway;
+    savedGateways = gatewayStore.list();
+  }
+}
+
+function handleAuthRequired(message) {
+  // The Gateway answered, so the address is right even if pairing still needs the user.
+  clearGatewayValidationTimeout();
+  gatewayShowsTvPin = message.pairing === "client-pin";
+  if (activeGateway) {
+    finishGatewayWake(activeGateway.id);
+    const macAddress = WakeOnLan.normalizeMacAddress(message.macAddress);
+    if (macAddress) {
+      activeGateway = Object.assign({}, activeGateway, { macAddress: macAddress });
+      learnGatewayMacAddress(activeGateway.id, message);
+    }
+  }
+  const credentials = activeGatewayCredentials();
+  if (!credentials) {
+    openGatewayPairDialog();
+    return;
+  }
+  try {
+    sendGatewayMessage({
+      type: "authenticate",
+      clientId: credentials.clientId,
+      proof: GatewayAuth.authenticationProof(credentials.clientSecret, message.nonce),
+    });
+  } catch (error) {
+    log("Gateway authentication unavailable: " + errorMessage(error));
+    openGatewayPairDialog();
+  }
+}
+
+function handleAuthenticationRejected() {
+  log("The Gateway no longer recognizes this TV; pairing is required");
+  storeActiveGatewayCredentials(null, null);
+  openGatewayPairDialog();
+}
+
+// Sunshine refuses a TV disabled in its client list but keeps it paired, so the credentials stay.
+function handleClientDisabled(message) {
+  const gatewayId = activeGateway ? activeGateway.id : "";
+  const detail = (message.message || "This TV is disabled in Sunshine")
+    + ". Enable it in Sunshine's Web UI under Troubleshooting.";
+  closeActiveGatewayConnection();
+  setGatewayRuntimeState(gatewayId, "Disabled");
+  if (!gatewayValidationFailed(detail)) {
+    showHome();
+    reportError("TV disabled", new Error(detail));
+  }
+}
+
+function handlePaired(message) {
+  if (!GatewayAuth.isValidCredentials(message.clientId, message.clientSecret)) {
+    handlePairingRejected({ message: "The Gateway sent invalid pairing credentials." });
+    return;
+  }
+  storeActiveGatewayCredentials(message.clientId, message.clientSecret);
+  closeGatewayPairDialog();
+  log("Paired with the Gateway");
+  showNotification("TV paired", gatewayDisplayName(), false);
+}
+
+function handlePairingRejected(message) {
+  if (!gatewayPairState) {
+    return;
+  }
+  if (gatewayPairState.showsPin) {
+    // A cancelled request waits for the user; a wrong or expired PIN is replaced at once.
+    if (message.code === "pairing-cancelled") {
+      setGatewayPairError(message.message || "Pairing was cancelled on the PC.");
+      gatewayPairConfirmButton.focus();
+    } else if (message.code === "incorrect-pin") {
+      requestGatewayPairing("The PIN entered on the PC did not match. Enter this new PIN instead.");
+    } else {
+      requestGatewayPairing(message.code === "pairing-expired" ? "" : message.message || "Pairing failed.");
+    }
+    return;
+  }
+  gatewayPairState.busy = false;
+  setGatewayPairError(message.message || "Pairing failed.");
+  gatewayPairConfirmButton.disabled = false;
+  gatewayPairConfirmButton.textContent = "Pair";
+  focusGatewayPairDigit(0);
+}
+
+// The first status on a connection means the Gateway has accepted this TV.
+function gatewayAuthenticated() {
+  gatewayAuthorized = true;
+  closeGatewayPairDialog();
+  gatewayStateElement.textContent = "Connected";
+  setHomeMessage("Connected. Loading Sunshine applications...", false);
+  requestApplications();
+  log("Gateway authenticated");
+  showNotification("Gateway connected", gatewayAddress(), false);
+}
+
 function handleGatewayStatus(message) {
+  if (!gatewayAuthorized) {
+    gatewayAuthenticated();
+  }
   sunshineReady = Boolean(message.sunshineDetected && message.sunshinePaired);
   if (!message.sunshineDetected) {
     sunshineStateElement.textContent = "Not detected";
@@ -575,7 +873,8 @@ function handleGatewayStatus(message) {
     setRunningApplication(message.runningAppId);
   }
   if (activeGateway) {
-    setGatewayRuntimeState(activeGateway.id, "Online");
+    finishGatewayWake(activeGateway.id);
+    setGatewayRuntimeState(activeGateway.id, reachableGatewayState(sunshineReady));
     completeGatewayValidation(message);
     if (ui) {
       ui.setActiveGateway(activeGateway);
@@ -629,6 +928,7 @@ function currentPreferenceValues() {
     hdr: hdrSelect.value === "true",
     bitrateKbps: Number.isInteger(Number(bitrateSelect.value))
       ? Number(bitrateSelect.value) : null,
+    frameInterpolation: interpolationSelect.value === "true",
   };
 }
 
@@ -636,7 +936,40 @@ function persistCurrentPreferences() {
   savedPreferences = preferences.replace(currentPreferenceValues());
 }
 
+function cacheCapabilities(message) {
+  if (!Array.isArray(message.videoModes) || message.videoModes.length === 0) {
+    return;
+  }
+  try {
+    durableStorage.setItem(CAPABILITIES_STORAGE_KEY, JSON.stringify({
+      videoModes: message.videoModes,
+      bitratesKbps: message.bitratesKbps,
+    }));
+  } catch (error) {
+    log("Unable to cache Gateway capabilities: " + errorMessage(error));
+  }
+}
+
+// Applied before any Gateway is reachable, so the cached list is treated as a hint about
+// the menu only. The live "capabilities" message replaces it wholesale on connect, and the
+// session itself is always negotiated against what the Gateway says now.
+function restoreCachedCapabilities() {
+  try {
+    const serialized = durableStorage.getItem(CAPABILITIES_STORAGE_KEY);
+    if (!serialized) {
+      return;
+    }
+    const cached = JSON.parse(serialized);
+    if (Array.isArray(cached.videoModes) && cached.videoModes.length > 0) {
+      applyCapabilities(cached);
+    }
+  } catch (error) {
+    log("Unable to restore cached Gateway capabilities: " + errorMessage(error));
+  }
+}
+
 function applyCapabilities(message) {
+  cacheCapabilities(message);
   videoModes = Array.isArray(message.videoModes) ? message.videoModes : [];
   if (videoModes.length > 0) {
     replaceSelectOptions(resolutionSelect, videoModes, {
@@ -671,7 +1004,29 @@ function selectedVideoMode() {
 }
 
 function codecDisplayName(codec) {
+  if (codec === "av1") {
+    return "AV1";
+  }
   return codec === "hevc" ? "HEVC (H.265)" : "H.264";
+}
+
+// H.264 and HEVC are what every supported Samsung TV decodes. AV1 depends on the model and
+// firmware, so it is offered only when this TV's WebRTC stack says it can receive it.
+function tvCanReceiveVideoCodec(codec) {
+  if (codec !== "av1") {
+    return true;
+  }
+  try {
+    const capabilities = window.RTCRtpReceiver && typeof RTCRtpReceiver.getCapabilities === "function"
+      ? RTCRtpReceiver.getCapabilities("video")
+      : null;
+    return Boolean(capabilities && Array.isArray(capabilities.codecs)
+      && capabilities.codecs.some(function (entry) {
+        return String(entry.mimeType).toLowerCase() === "video/av1";
+      }));
+  } catch (error) {
+    return false;
+  }
 }
 
 function updateHdrOptions(mode, preferredHdr) {
@@ -690,9 +1045,18 @@ function updateHdrOptions(mode, preferredHdr) {
     onOption.textContent = mode.hdrExperimental ? "On — Experimental" : "On";
     hdrSelect.appendChild(onOption);
   }
-  hdrSelect.value = hdrWasEnabled && supportsHdr && codecSelect.value === "hevc"
+  hdrSelect.value = hdrWasEnabled && codecSupportsHdr(mode, codecSelect.value)
     ? "true"
     : "false";
+}
+
+// A Gateway from before AV1 HDR does not send hdrCodecs and offered HDR with HEVC only.
+function codecSupportsHdr(mode, codec) {
+  if (!mode || !mode.hdrSupported) {
+    return false;
+  }
+  const hdrCodecs = Array.isArray(mode.hdrCodecs) ? mode.hdrCodecs : ["hevc"];
+  return hdrCodecs.indexOf(codec) >= 0;
 }
 
 function applySelectedVideoMode(preferencesToRestore) {
@@ -703,10 +1067,11 @@ function applySelectedVideoMode(preferencesToRestore) {
   const previousCodec = preferencesToRestore && preferencesToRestore.codec
     ? preferencesToRestore.codec
     : codecSelect.value;
+  const codecs = mode.codecs.filter(tvCanReceiveVideoCodec);
   const keepIntentionalCodec = codecSelectionWasIntentional
-    && mode.codecs.indexOf(previousCodec) >= 0;
+    && codecs.indexOf(previousCodec) >= 0;
   updatingCodecOptions = true;
-  replaceSelectOptions(codecSelect, mode.codecs, {
+  replaceSelectOptions(codecSelect, codecs, {
     value: function (codec) { return codec; },
     label: codecDisplayName,
   });
@@ -792,6 +1157,18 @@ function setRunningApplication(appId) {
 }
 
 function handleGatewayError(message) {
+  if (message.requestType === "authenticate") {
+    if (message.code === "client-disabled") {
+      handleClientDisabled(message);
+    } else {
+      handleAuthenticationRejected();
+    }
+    return;
+  }
+  if (message.requestType === "pair-client" || message.requestType === "request-pairing") {
+    handlePairingRejected(message);
+    return;
+  }
   const detail = message.message || "Gateway request failed";
   reportError(message.requestType || "Gateway", new Error(detail));
   if (sessionState !== "streaming") {
@@ -919,6 +1296,10 @@ function handleSessionStatus(message) {
     launchCancellationSent = false;
     if (!launchingScreen.hidden) {
       showHome("applications");
+    } else if (!streamingScreen.hidden) {
+      // The idle status that follows replaces the home message, so the reason the
+      // stream ended mid-game is shown where it stays readable.
+      showNotification("Stream ended", message.message || "Session failed", true);
     }
     setHomeMessage(message.message || "Session failed", true);
     if (currentSessionId) {
@@ -1195,6 +1576,7 @@ function closePeerConnection() {
     track.stop();
   });
   updateTrackCounts();
+  frameInterpolation.setEnabled(false);
   videoElement.hidden = true;
   playbackPromptElement.hidden = true;
   connectionStateElement.textContent = "closed";
@@ -1213,6 +1595,55 @@ async function startPlayback() {
       log("Audio playback requires pressing OK");
     }
   }
+}
+
+const frameInterpolation = FrameInterpolation.create({
+  video: videoElement,
+  canvas: interpolationCanvas,
+  log: log,
+});
+
+const INTERPOLATION_STATUS_LABELS = {
+  off: "Off",
+  starting: "Starting",
+  probing: "Checking video access",
+  active: "On",
+  "no-headroom": "On — no spare frames",
+  unsupported: "Unavailable on this TV",
+  failed: "Stopped after an error",
+};
+
+// Second line of the same row. Empty where the label already says everything: an explanation
+// repeated under a label that carries it reads as two different pieces of information.
+const INTERPOLATION_STATUS_DETAILS = {
+  off: "costs one frame of latency",
+  unsupported: "this TV will not share video frames",
+};
+
+// Only ever runs while a stream is actually on screen and in the foreground. Leaving the
+// canvas compositing over a hidden video would keep a full-resolution draw loop alive for
+// nothing, on the one thread this app cannot afford to lose.
+function applyFrameInterpolation() {
+  frameInterpolation.setEnabled(interpolationSelect.value === "true"
+    && !streamingScreen.hidden && !document.hidden);
+  updateInterpolationStatus();
+}
+
+// Written into the interpolation row itself rather than a row of its own. Two adjacent rows
+// both reading "Off", only one of them selectable, is a menu that invites you to try to
+// select the wrong one.
+function updateInterpolationStatus() {
+  const status = frameInterpolation.status();
+  const label = INTERPOLATION_STATUS_LABELS[status.reason] || status.reason;
+  const measured = status.reason === "active" || status.reason === "no-headroom";
+  const detail = measured
+    ? String(status.sourceFps) + " → " + String(status.outputFps) + " fps, +"
+      + String(Math.round(status.addedLatencyMs)) + " ms"
+    : INTERPOLATION_STATUS_DETAILS[status.reason] || "";
+  interpolationStatusElement.textContent = detail ? label + " — " + detail : label;
+  overlay.interpolation.textContent = measured
+    ? String(status.sourceFps) + " → " + String(status.outputFps)
+    : label;
 }
 
 function updateTrackCounts() {
@@ -1254,6 +1685,7 @@ function showStreaming() {
   updateStreamOverlay();
   showOverlayTemporarily();
   startPlayback();
+  applyFrameInterpolation();
 }
 
 function showHome(view) {
@@ -1327,6 +1759,7 @@ function focusFirstHomeControl() {
 
 function closeActiveGatewayConnection() {
   gatewayConnectionToken += 1;
+  cancelGatewayWake();
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -1351,14 +1784,290 @@ function activateGateway(gatewayId) {
     ui.showApplications();
     return;
   }
+  if (gatewayWakeIsActive(gateway.id)) {
+    showNotification("Waking " + gateway.name, "Waiting for the PC to start...", false);
+    return;
+  }
+  // Choosing a PC that is off means the user wants it on, so wake it when the TV can.
+  if (gateway.macAddress && gatewayRuntimeStates.get(gateway.id) === "Offline" && wakeOnLan.isSupported()) {
+    wakeGateway(gateway.id);
+    return;
+  }
   closeActiveGatewayConnection();
   activeGateway = gateway;
   openApplicationsAfterConnection = true;
   connectGateway(gateway);
 }
 
+function gatewayWakeIsActive(gatewayId) {
+  return Boolean(gatewayWake && gatewayWake.gatewayId === gatewayId);
+}
+
+function cancelGatewayWake() {
+  if (gatewayWake) {
+    clearTimeout(gatewayWake.timer);
+    gatewayWake = null;
+  }
+}
+
+function finishGatewayWake(gatewayId) {
+  if (!gatewayWakeIsActive(gatewayId)) {
+    return;
+  }
+  const name = gatewayWake.name;
+  cancelGatewayWake();
+  showNotification(name + " is awake", "Loading Sunshine applications...", false);
+}
+
+function gatewayWakeTimedOut(gatewayId) {
+  if (!gatewayWakeIsActive(gatewayId)) {
+    return;
+  }
+  const name = gatewayWake.name;
+  closeActiveGatewayConnection();
+  setGatewayRuntimeState(gatewayId, "Offline");
+  const message = name + " did not wake up. Check that Wake-on-LAN is enabled on the PC.";
+  setHomeMessage(message, true);
+  showNotification("PC did not wake up", message, true);
+}
+
+// Sends the magic packet and keeps connecting until the Gateway answers or the PC has had
+// GATEWAY_WAKE_TIMEOUT_MS to boot. Sending it again to a PC that is already on is harmless.
+function wakeGateway(gatewayId) {
+  const gateway = gatewayStore.find(gatewayId);
+  if (!gateway || sessionState !== "idle") {
+    return false;
+  }
+  if (!gateway.macAddress) {
+    showNotification("Wake PC unavailable",
+      "Connect to " + gateway.name + " once while the PC is on so the TV can learn how to wake it.", true);
+    return false;
+  }
+  closeActiveGatewayConnection();
+  activeGateway = gateway;
+  openApplicationsAfterConnection = true;
+  gatewayWake = {
+    gatewayId: gateway.id,
+    name: gateway.name,
+    timer: setTimeout(function () { gatewayWakeTimedOut(gateway.id); }, GATEWAY_WAKE_TIMEOUT_MS),
+  };
+  log("Sending Wake-on-LAN to " + gateway.name + " (" + gateway.macAddress + ")");
+  wakeOnLan.wake(gateway.macAddress, gateway.host).then(function (result) {
+    log("Wake-on-LAN sent " + result.sent + " packet(s) to " + gateway.name);
+    if (gatewayWakeIsActive(gateway.id)) {
+      showNotification("Waking " + gateway.name, "Waiting for the PC to start...", false);
+    }
+  }).catch(function (error) {
+    log("Wake-on-LAN failed for " + gateway.name + ": " + errorMessage(error));
+    if (gatewayWakeIsActive(gateway.id)) {
+      cancelGatewayWake();
+      renderGateways();
+    }
+    showNotification("Unable to wake " + gateway.name, errorMessage(error), true);
+  });
+  connectGateway(gateway);
+  return true;
+}
+
 function gatewayEditorIsOpen() {
   return !gatewayEditorDialog.hidden;
+}
+
+function gatewayPairDialogIsOpen() {
+  return !gatewayPairDialog.hidden;
+}
+
+function setGatewayPairError(message) {
+  gatewayPairError.textContent = message || "";
+  gatewayPairError.hidden = !message;
+}
+
+function updateGatewayPairDialog() {
+  if (!gatewayPairState) {
+    return;
+  }
+  gatewayPairDigitButtons.forEach(function (button, index) {
+    button.textContent = String(gatewayPairState.digits[index]);
+  });
+}
+
+function openGatewayPairDialog() {
+  if (gatewayPairDialogIsOpen()) {
+    return;
+  }
+  const showsPin = gatewayShowsTvPin;
+  gatewayPairState = { digits: [0, 0, 0, 0], selected: 0, busy: false, showsPin: showsPin };
+  setGatewayPairError("");
+  gatewayPairInstructions.textContent = showsPin
+    ? "On the PC, open Sunshine's Web UI › PIN, select this TV and enter this PIN."
+    : "On the PC, open Moonlight WebRTC from the system tray, choose TVs › Pair TV, and enter the PIN it shows.";
+  gatewayPairHint.hidden = showsPin;
+  gatewayPairDigitButtons.forEach(function (button) {
+    button.disabled = showsPin;
+  });
+  gatewayPairConfirmButton.disabled = false;
+  gatewayPairConfirmButton.textContent = showsPin ? "New PIN" : "Pair";
+  updateGatewayPairDialog();
+  gatewayStateElement.textContent = "Pairing required";
+  if (activeGateway) {
+    setGatewayRuntimeState(activeGateway.id, "Not paired");
+  }
+  setHomeMessage("Pair this TV with " + gatewayDisplayName() + " to continue.", false);
+  gatewayPairDialog.hidden = false;
+  if (showsPin) {
+    requestGatewayPairing("");
+    gatewayPairCancelButton.focus();
+  } else {
+    gatewayPairDigitButtons[0].focus();
+  }
+}
+
+function randomPinDigit() {
+  if (!window.crypto || typeof window.crypto.getRandomValues !== "function") {
+    return Math.floor(Math.random() * 10);
+  }
+  // Rejecting bytes from 250 up keeps every digit equally likely.
+  const byte = new Uint8Array(1);
+  do {
+    window.crypto.getRandomValues(byte);
+  } while (byte[0] >= 250);
+  return byte[0] % 10;
+}
+
+function randomPinDigits() {
+  return [randomPinDigit(), randomPinDigit(), randomPinDigit(), randomPinDigit()];
+}
+
+// Shows a fresh PIN and asks Sunshine to list this TV until the PIN is entered in its Web UI.
+function requestGatewayPairing(errorMessageText) {
+  if (!gatewayPairState) {
+    return;
+  }
+  gatewayPairState.digits = randomPinDigits();
+  updateGatewayPairDialog();
+  setGatewayPairError(errorMessageText);
+  try {
+    sendGatewayMessage({ type: "request-pairing", pin: gatewayPairState.digits.join(""), clientName: "Samsung TV" });
+  } catch (error) {
+    setGatewayPairError("The connection to the Gateway was lost.");
+  }
+}
+
+function closeGatewayPairDialog() {
+  if (!gatewayPairDialogIsOpen()) {
+    return false;
+  }
+  gatewayPairDialog.hidden = true;
+  gatewayPairState = null;
+  if (gatewayEditorIsOpen()) {
+    gatewayEditorConnectButton.focus();
+  } else if (ui && activeGateway) {
+    const card = ui.gatewayCard(activeGateway.id);
+    if (card) {
+      card.focus();
+    }
+  }
+  return true;
+}
+
+function cancelGatewayPairing() {
+  const gatewayId = activeGateway ? activeGateway.id : "";
+  closeGatewayPairDialog();
+  closeActiveGatewayConnection();
+  setGatewayRuntimeState(gatewayId, "Not paired");
+  if (!gatewayValidationFailed("Pairing was cancelled.")) {
+    setHomeMessage("Pairing cancelled. Select the Gateway to try again.", false);
+  }
+}
+
+function submitGatewayPairing() {
+  if (!gatewayPairState || gatewayPairState.busy) {
+    return;
+  }
+  if (gatewayPairState.showsPin) {
+    requestGatewayPairing("");
+    return;
+  }
+  gatewayPairState.busy = true;
+  setGatewayPairError("");
+  gatewayPairConfirmButton.disabled = true;
+  gatewayPairConfirmButton.textContent = "Pairing...";
+  try {
+    sendGatewayMessage({ type: "pair-client", pin: gatewayPairState.digits.join(""), clientName: "Samsung TV" });
+  } catch (error) {
+    handlePairingRejected({ message: "The connection to the Gateway was lost." });
+  }
+}
+
+function selectedGatewayPairDigitIndex() {
+  const index = gatewayPairDigitButtons.indexOf(document.activeElement);
+  return index >= 0 ? index : (gatewayPairState ? gatewayPairState.selected : 0);
+}
+
+function focusGatewayPairDigit(index) {
+  const normalized = Math.max(0, Math.min(gatewayPairDigitButtons.length - 1, index));
+  if (gatewayPairState) {
+    gatewayPairState.selected = normalized;
+  }
+  gatewayPairDigitButtons[normalized].focus();
+}
+
+// Typing a digit fills the selected box and moves on, ending on Pair.
+function enterGatewayPairDigit(value) {
+  if (!gatewayPairState || gatewayPairState.busy || gatewayPairState.showsPin) {
+    return;
+  }
+  const index = selectedGatewayPairDigitIndex();
+  gatewayPairState.digits[index] = value;
+  updateGatewayPairDialog();
+  if (index + 1 < gatewayPairDigitButtons.length) {
+    focusGatewayPairDigit(index + 1);
+  } else {
+    gatewayPairConfirmButton.focus();
+  }
+}
+
+function navigateGatewayPairDialog(direction) {
+  if (!gatewayPairState) {
+    return false;
+  }
+  const active = document.activeElement;
+  // A PIN this TV shows is read, not edited: only Cancel and New PIN take focus.
+  if (gatewayPairState.showsPin) {
+    if (direction === "left" || direction === "right") {
+      (active === gatewayPairCancelButton ? gatewayPairConfirmButton : gatewayPairCancelButton).focus();
+    }
+    return true;
+  }
+  const digitIndex = gatewayPairDigitButtons.indexOf(active);
+  if (digitIndex >= 0) {
+    gatewayPairState.selected = digitIndex;
+    if (direction === "left") {
+      focusGatewayPairDigit(digitIndex - 1);
+    } else if (direction === "right") {
+      if (digitIndex + 1 < gatewayPairDigitButtons.length) {
+        focusGatewayPairDigit(digitIndex + 1);
+      } else {
+        gatewayPairConfirmButton.focus();
+      }
+    } else if (!gatewayPairState.busy) {
+      const step = direction === "up" ? 1 : 9;
+      gatewayPairState.digits[digitIndex] = (gatewayPairState.digits[digitIndex] + step) % 10;
+      updateGatewayPairDialog();
+      focusGatewayPairDigit(digitIndex);
+    }
+    return true;
+  }
+  if (active === gatewayPairCancelButton || active === gatewayPairConfirmButton) {
+    if (direction === "left" || direction === "right") {
+      (active === gatewayPairCancelButton ? gatewayPairConfirmButton : gatewayPairCancelButton).focus();
+    } else if (direction === "up") {
+      focusGatewayPairDigit(gatewayPairState.selected);
+    }
+    return true;
+  }
+  focusGatewayPairDigit(gatewayPairState.selected);
+  return true;
 }
 
 function gatewayContextMenuIsOpen() {
@@ -1479,11 +2188,17 @@ function connectGatewayFromEditor() {
     return;
   }
   const host = GatewayIpv4.format(gatewayEditorState.octets);
+  const previousGateway = gatewayEditorState.previousGateway;
   const candidate = {
     host: host,
     port: GatewayStore.DEFAULT_PORT,
-    name: gatewayEditorState.previousGateway ? gatewayEditorState.previousGateway.name : "Gateway " + host,
+    name: previousGateway ? previousGateway.name : "Gateway " + host,
   };
+  // A PC whose address changed keeps its pairing; a different PC rejects it and asks to pair.
+  if (previousGateway && previousGateway.clientId) {
+    candidate.clientId = previousGateway.clientId;
+    candidate.clientSecret = previousGateway.clientSecret;
+  }
   pendingGatewayValidation = {
     mode: gatewayEditorState.mode,
     previousId: gatewayEditorState.previousId,
@@ -1531,9 +2246,16 @@ function openGatewayContextMenu() {
   }
   gatewayContextGatewayId = gateway.id;
   gatewayContextHeading.textContent = gateway.name;
+  gatewayWakeButton.hidden = !gateway.macAddress || gatewayIsAwake(gatewayRuntimeStates.get(gateway.id));
   gatewayContextMenu.hidden = false;
-  gatewayEditButton.focus();
+  (gatewayWakeButton.hidden ? gatewayEditButton : gatewayWakeButton).focus();
   return true;
+}
+
+function wakeGatewayFromContextMenu() {
+  const gatewayId = gatewayContextGatewayId;
+  closeGatewayContextMenu();
+  wakeGateway(gatewayId);
 }
 
 function openGatewayRemoveDialog() {
@@ -1575,6 +2297,7 @@ function removeGateway() {
   }
   gatewayStore.remove(gatewayId);
   savedGateways = gatewayStore.list();
+  stopGatewayWatch(gatewayId);
   gatewayRuntimeStates.delete(gatewayId);
   gatewayRemoveDialog.hidden = true;
   gatewayRemoveGatewayId = null;
@@ -1794,7 +2517,18 @@ function gamepadUiRoute() {
 function settingLabel(select) {
   const row = select && select.closest(".setting-row");
   const label = row && row.querySelector("span");
-  return label ? label.textContent : "Select value";
+  if (!label) {
+    return "Select value";
+  }
+  // A row may carry its own status line inside the same span. The picker is titled with the
+  // setting's name, not with the name and its current state run together.
+  let name = "";
+  Array.prototype.forEach.call(label.childNodes, function (node) {
+    if (node.nodeType === 3) {
+      name += node.textContent;
+    }
+  });
+  return name.trim() || label.textContent;
 }
 
 function settingsSelectorIsOpen() {
@@ -1853,6 +2587,10 @@ function navigateUi(direction) {
   if (!launchingScreen.hidden) {
     return false;
   }
+  // Pairing opens on top of the Gateway editor, so it is routed first.
+  if (gatewayPairDialogIsOpen()) {
+    return navigateGatewayPairDialog(direction);
+  }
   if (gatewayEditorIsOpen()) {
     return navigateGatewayEditor(direction);
   }
@@ -1906,6 +2644,21 @@ function activateFocusedControl() {
     return false;
   }
   const active = document.activeElement;
+  if (gatewayPairDialogIsOpen()) {
+    if (active === gatewayPairCancelButton) {
+      cancelGatewayPairing();
+    } else if (active === gatewayPairConfirmButton) {
+      submitGatewayPairing();
+    } else {
+      const digitIndex = gatewayPairDigitButtons.indexOf(active);
+      if (digitIndex >= 0 && digitIndex + 1 < gatewayPairDigitButtons.length) {
+        focusGatewayPairDigit(digitIndex + 1);
+      } else {
+        gatewayPairConfirmButton.focus();
+      }
+    }
+    return true;
+  }
   if (gatewayEditorIsOpen()) {
     if (active === gatewayEditorCancelButton) {
       closeGatewayEditor();
@@ -1918,6 +2671,10 @@ function activateFocusedControl() {
     return gatewayOctetButtons.indexOf(active) >= 0;
   }
   if (gatewayContextMenuIsOpen()) {
+    if (active === gatewayWakeButton) {
+      wakeGatewayFromContextMenu();
+      return true;
+    }
     if (active === gatewayEditButton) {
       const gatewayId = gatewayContextGatewayId;
       closeGatewayContextMenu();
@@ -1980,6 +2737,10 @@ function activateFocusedControl() {
 }
 
 function goBackFromUiInput() {
+  if (gatewayPairDialogIsOpen()) {
+    cancelGatewayPairing();
+    return true;
+  }
   if (gatewayEditorIsOpen()) {
     restoreGatewayEditorConnectAction();
     return closeGatewayEditor();
@@ -2008,16 +2769,6 @@ function goBackFromUiInput() {
     return true;
   }
 
-  if (settingsSelectorIsOpen()) {
-    if (isUp || isDown) {
-      event.preventDefault();
-      navigateUi(isDown ? "down" : "up");
-    } else if (isEnter) {
-      event.preventDefault();
-      activateFocusedControl();
-    }
-    return;
-  }
   if (ui && ui.goBack()) {
     return true;
   }
@@ -2041,6 +2792,13 @@ document.addEventListener("keydown", function (event) {
   const isDown = key === "ArrowDown" || keyCode === 40;
   const isLeft = key === "ArrowLeft" || keyCode === 37;
   const isRight = key === "ArrowRight" || keyCode === 39;
+  const digit = /^[0-9]$/.test(key) ? Number(key) : (keyCode >= 48 && keyCode <= 57 ? keyCode - 48 : -1);
+
+  if (digit >= 0 && gatewayPairDialogIsOpen()) {
+    event.preventDefault();
+    enterGatewayPairDigit(digit);
+    return;
+  }
 
   if (!streamingScreen.hidden) {
     if (isBack) {
@@ -2087,6 +2845,15 @@ document.addEventListener("keydown", function (event) {
   }
 });
 
+// The remote's number keys reach the app only once registered; they enter a pairing PIN.
+try {
+  if (window.tizen && tizen.tvinputdevice) {
+    tizen.tvinputdevice.registerKeyBatch(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  }
+} catch (error) {
+  log("Number keys unavailable: " + errorMessage(error));
+}
+
 playButton.addEventListener("click", startSelectedSession);
 continueButton.addEventListener("click", hideStreamMenu);
 diagnosticsButton.addEventListener("click", toggleDiagnostics);
@@ -2103,18 +2870,19 @@ codecSelect.addEventListener("change", function () {
   if (!updatingCodecOptions) {
     codecSelectionWasIntentional = true;
   }
-  if (codecSelect.value !== "hevc") {
+  if (!codecSupportsHdr(selectedVideoMode(), codecSelect.value)) {
     hdrSelect.value = "false";
   }
   updateHdrOptions(selectedVideoMode());
   persistCurrentPreferences();
 });
 hdrSelect.addEventListener("change", function () {
-  if (hdrSelect.value === "true" && codecSelect.value !== "hevc") {
+  const mode = selectedVideoMode();
+  // Turning HDR on keeps an HDR-capable codec (HEVC or AV1) and otherwise switches to HEVC.
+  if (hdrSelect.value === "true" && !codecSupportsHdr(mode, codecSelect.value)) {
     codecSelect.value = "hevc";
     codecSelectionWasIntentional = true;
   }
-  const mode = selectedVideoMode();
   updateHdrOptions(mode);
   if (mode && mode.experimental) {
     setHomeMessage(hdrSelect.value === "true"
@@ -2124,6 +2892,10 @@ hdrSelect.addEventListener("change", function () {
   persistCurrentPreferences();
 });
 bitrateSelect.addEventListener("change", persistCurrentPreferences);
+interpolationSelect.addEventListener("change", function () {
+  persistCurrentPreferences();
+  applyFrameInterpolation();
+});
 
 function updateRemoteTracksForVisibility() {
   const enabled = !document.hidden;
@@ -2136,6 +2908,7 @@ function updateRemoteTracksForVisibility() {
   } else if (!enabled) {
     suspendGamepadInput(true);
   }
+  applyFrameInterpolation();
 }
 
 document.addEventListener("visibilitychange", updateRemoteTracksForVisibility);
@@ -2449,6 +3222,7 @@ const gamepadInputManager = new window.GamepadInputManager({
   log: log,
   reportError: reportError,
   diagnostics: gamepadDiagnostics,
+  isDiagnosticsVisible: diagnosticsVisible,
   overlay: overlay.gamepad,
   mouseOverlay: document.getElementById("mouse-mode-overlay"),
   onStopShortcut: handleGamepadStopShortcut,
@@ -2456,6 +3230,7 @@ const gamepadInputManager = new window.GamepadInputManager({
 });
 
 const gamepadUiNavigation = window.GamepadUiNavigation.create({
+  log: log,
   route: gamepadUiRoute,
   navigate: navigateUi,
   activate: activateFocusedControl,
@@ -2560,10 +3335,24 @@ function displayRuntimeValue(element, value) {
     : typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+function diagnosticsVisible() {
+  return !diagnosticsElement.hidden;
+}
+
 async function updateStatistics() {
   if (!peerConnection) {
     return;
   }
+  // getStats() walks every RTP report and this then writes ~25 DOM nodes, once a second,
+  // for a panel that is hidden unless the viewer opened it. It cannot simply stop while
+  // hidden because it also emits the five-second stream diagnostics line, so it slows to
+  // the slowest cadence that still keeps that line on schedule.
+  const sampledAt = performance.now();
+  if (!diagnosticsVisible()
+      && sampledAt - lastStatisticsSampleTime < HIDDEN_STATISTICS_INTERVAL_MS) {
+    return;
+  }
+  lastStatisticsSampleTime = sampledAt;
   try {
     const reports = await peerConnection.getStats();
     let inboundVideo = null;
@@ -2697,6 +3486,7 @@ gatewayEditorCancelButton.addEventListener("click", function () {
   closeGatewayEditor();
 });
 gatewayEditorConnectButton.addEventListener("click", connectGatewayFromEditor);
+gatewayWakeButton.addEventListener("click", wakeGatewayFromContextMenu);
 gatewayEditButton.addEventListener("click", function () {
   const gatewayId = gatewayContextGatewayId;
   closeGatewayContextMenu();
@@ -2724,11 +3514,21 @@ ui.setActiveGateway(null);
 ui.setSunshineState("Unknown");
 ui.setWebRtcState("Idle");
 
-setInterval(updateStatistics, 1000);
+setInterval(function () {
+  updateStatistics();
+  updateInterpolationStatus();
+}, 1000);
 updateTrackCounts();
 gamepadInputManager.updateDiagnostics();
 syncGamepadUi();
 showHome();
 gamepadUiNavigation.start();
+log("Persistent storage: " + durableStorage.describe());
+// Restored before the cached capabilities are applied: applying them persists the whole
+// preference set, and a select still holding its markup default would write that default
+// back over the saved value.
+interpolationSelect.value = savedPreferences.frameInterpolation ? "true" : "false";
+restoreCachedCapabilities();
+updateInterpolationStatus();
 renderGateways();
 probeSavedGateways();

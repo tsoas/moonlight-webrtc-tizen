@@ -38,7 +38,7 @@ std::string startMessage(int width,
                          int channels)
 {
     return nlohmann::json({
-        {"version", 1},
+        {"version", 2},
         {"type", "start-session"},
         {"appId", "7"},
         {"video",
@@ -157,6 +157,11 @@ int main()
                     parsedHevc4k.payload).settings
                     == settings4k,
                 "HEVC 4K start-session parsing failed");
+        require(std::get<gateway::protocol::StartSessionRequest>(
+                    gateway::protocol::parseClientMessage(
+                        startMessage(3840, 2160, 60, "hevc", 100000, false, 2)).payload)
+                    .settings.bitrateKbps == 100000,
+                "100 Mbps start-session parsing failed");
         const auto parsedHdr1080 = gateway::protocol::parseClientMessage(
             startMessage(1920, 1080, 60, "hevc", 20000, true, 2));
         require(std::get<gateway::protocol::StartSessionRequest>(
@@ -232,30 +237,30 @@ int main()
             "unsupported-settings");
 
         const auto getApps = gateway::protocol::parseClientMessage(
-            R"({"version":1,"type":"get-apps"})");
+            R"({"version":2,"type":"get-apps"})");
         require(std::holds_alternative<gateway::protocol::GetAppsRequest>(getApps.payload),
                 "get-apps parsing failed");
         const auto getArtwork = gateway::protocol::parseClientMessage(
-            R"({"version":1,"type":"get-app-artwork","appId":"7"})");
+            R"({"version":2,"type":"get-app-artwork","appId":"7"})");
         require(std::get<gateway::protocol::GetAppArtworkRequest>(getArtwork.payload).appId == "7",
                 "get-app-artwork parsing failed");
         requireProtocolError(
             [] {
                 gateway::protocol::parseClientMessage(
-                    R"({"version":1,"type":"get-app-artwork","appId":""})");
+                    R"({"version":2,"type":"get-app-artwork","appId":""})");
             },
             "invalid-message");
         const auto stop = gateway::protocol::parseClientMessage(
-            R"({"version":1,"type":"stop-session"})");
+            R"({"version":2,"type":"stop-session"})");
         require(std::holds_alternative<gateway::protocol::StopSessionRequest>(stop.payload),
                 "stop-session parsing failed");
         const auto stopHost = gateway::protocol::parseClientMessage(
-            R"({"version":1,"type":"stop-host-session"})");
+            R"({"version":2,"type":"stop-host-session"})");
         require(std::holds_alternative<gateway::protocol::StopHostSessionRequest>(stopHost.payload),
                 "stop-host-session parsing failed");
         const auto switchSession = gateway::protocol::parseClientMessage(
             nlohmann::json({
-                {"version", 1},
+                {"version", 2},
                 {"type", "switch-session"},
                 {"appId", "7"},
                 {"video",
@@ -274,9 +279,69 @@ int main()
         requireProtocolError(
             [] {
                 gateway::protocol::parseClientMessage(
-                    R"({"version":2,"type":"stop-session"})");
+                    R"({"version":1,"type":"stop-session"})");
             },
             "unsupported-version");
+
+        // A version 1 client predates authentication and must be refused, not served.
+        const auto authenticate = gateway::protocol::parseClientMessage(
+            R"({"version":2,"type":"authenticate","clientId":"0011","proof":"abcd"})");
+        const auto& authenticateRequest =
+            std::get<gateway::protocol::AuthenticateRequest>(authenticate.payload);
+        require(authenticateRequest.clientId == "0011" && authenticateRequest.proof == "abcd",
+                "authenticate parsing failed");
+        requireProtocolError(
+            [] {
+                gateway::protocol::parseClientMessage(
+                    R"({"version":2,"type":"authenticate","clientId":"","proof":"abcd"})");
+            },
+            "invalid-message");
+        const auto pairClient = gateway::protocol::parseClientMessage(
+            R"({"version":2,"type":"pair-client","pin":"0421","clientName":"Living room"})");
+        const auto& pairRequest = std::get<gateway::protocol::PairClientRequest>(pairClient.payload);
+        require(pairRequest.pin == "0421" && pairRequest.clientName == "Living room",
+                "pair-client parsing failed");
+        requireProtocolError(
+            [] {
+                gateway::protocol::parseClientMessage(
+                    R"({"version":2,"type":"pair-client","pin":"12345"})");
+            },
+            "invalid-message");
+        requireProtocolError(
+            [] {
+                gateway::protocol::parseClientMessage(
+                    R"({"version":2,"type":"pair-client","pin":1234})");
+            },
+            "invalid-message");
+        const auto authRequired = gateway::protocol::makeAuthRequired("ffee");
+        require(authRequired.at("version") == 2 && authRequired.at("type") == "auth-required"
+                    && authRequired.at("nonce") == "ffee" && authRequired.size() == 3,
+                "auth-required must carry only the nonce");
+        const auto wakeableAuthRequired =
+            gateway::protocol::makeAuthRequired("ffee", std::string("2C:F0:5D:7B:E6:D0"));
+        require(wakeableAuthRequired.at("macAddress") == "2C:F0:5D:7B:E6:D0"
+                    && wakeableAuthRequired.size() == 4,
+                "auth-required must offer the Wake-on-LAN address");
+        const auto unavailableAuthRequired =
+            gateway::protocol::makeAuthRequired("ffee", std::nullopt, false);
+        require(unavailableAuthRequired.at("sunshineAvailable") == false
+                    && unavailableAuthRequired.size() == 4,
+                "auth-required must report a Sunshine the Gateway cannot reach");
+        const auto availableAuthRequired =
+            gateway::protocol::makeAuthRequired("ffee", std::nullopt, true);
+        require(availableAuthRequired.at("sunshineAvailable") == true,
+                "auth-required must report a reachable Sunshine");
+        const auto availability = gateway::protocol::makeSunshineAvailability(true);
+        require(availability.at("version") == 2
+                    && availability.at("type") == "sunshine-availability"
+                    && availability.at("sunshineAvailable") == true && availability.size() == 3,
+                "sunshine-availability must carry only the availability");
+        const auto paired = gateway::protocol::makePaired("0011", "2233");
+        require(paired.at("type") == "paired" && paired.at("clientId") == "0011"
+                    && paired.at("clientSecret") == "2233",
+                "paired generation failed");
+        require(gateway::protocol::makeAuthenticated().at("type") == "authenticated",
+                "authenticated generation failed");
 
         const auto hostStopping = gateway::protocol::makeHostSessionStatus(
             "stopping", "7", std::nullopt, "Stopping Desktop");
@@ -346,6 +411,18 @@ int main()
         require(!gateway::hasExpectedVideoCodec(
                     h264Sdp, gateway::VideoCodec::HEVC),
                 "H.264 SDP was accepted for HEVC");
+        const std::string av1Sdp =
+            "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+            "a=rtpmap:96 AV1/90000\r\n"
+            "a=" + imageAttribute1080 + "\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+        require(gateway::hasExpectedVideoCodec(av1Sdp, gateway::VideoCodec::AV1),
+                "AV1 SDP codec validation failed");
+        require(!gateway::hasExpectedVideoCodec(av1Sdp, gateway::VideoCodec::H264)
+                    && !gateway::hasExpectedVideoCodec(h264Sdp, gateway::VideoCodec::AV1),
+                "AV1 and H.264 SDP were confused");
+        require(gateway::parseVideoCodec("AV1") == gateway::VideoCodec::AV1
+                    && gateway::videoCodecName(gateway::VideoCodec::AV1) == "av1",
+                "AV1 codec name does not round-trip");
         require(gateway::hevcFormatParameters(settingsHevc1080) == std::nullopt
                     && gateway::hevcFormatParameters(settingsHdr1080)
                         == "profile-id=2;tier-flag=0;level-id=123"
@@ -397,6 +474,19 @@ int main()
                     colorSpaceSdp, "urn:example:not-negotiated"),
                 "Unrelated video extmap was accepted");
 
+        const auto av1Capabilities = gateway::protocol::makeCapabilities({true, false});
+        require(av1Capabilities.at("codecs")
+                        == nlohmann::json::array({"h264", "hevc", "av1"})
+                    && av1Capabilities.at("videoModes").at(3).at("codecs")
+                        == nlohmann::json::array({"hevc", "av1"})
+                    && av1Capabilities.at("videoModes").at(3).at("hdrCodecs")
+                        == nlohmann::json::array({"hevc"}),
+                "AV1 must be advertised when Sunshine can encode it, HDR only with Main10");
+        const auto av1HdrCapabilities = gateway::protocol::makeCapabilities({true, true});
+        require(av1HdrCapabilities.at("videoModes").at(1).at("hdrCodecs")
+                        == nlohmann::json::array({"hevc", "av1"})
+                    && av1HdrCapabilities.at("videoModes").at(0).at("hdrCodecs").empty(),
+                "AV1 HDR must be advertised where HEVC HDR is");
         const auto capabilities = gateway::protocol::makeCapabilities();
         require(capabilities.at("resolutions").size() == 4
                     && capabilities.at("videoModes").size() == 4
@@ -454,6 +544,11 @@ int main()
         runningStatus.runningAppId = "7";
         require(gateway::protocol::makeGatewayStatus(runningStatus).at("runningAppId") == "7",
                 "Gateway status must expose the current Sunshine application");
+        require(!gateway::protocol::makeGatewayStatus(runningStatus).contains("macAddress"),
+                "Gateway status must omit an unknown Wake-on-LAN address");
+        runningStatus.macAddress = "00:1A:2B:3C:4D:5E";
+        require(gateway::protocol::makeGatewayStatus(runningStatus).at("macAddress") == "00:1A:2B:3C:4D:5E",
+                "Gateway status must expose its Wake-on-LAN address");
 
         std::cout << "Gateway protocol tests passed\n";
         return 0;

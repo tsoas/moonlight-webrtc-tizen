@@ -2,9 +2,11 @@
 
 #include "moonlight/control/MoonlightControlTypes.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace gateway::moonlight {
 
@@ -44,6 +46,10 @@ public:
     std::optional<std::string> configuredSunshineHost() const;
     void saveConfiguredSunshineHost(const std::string& host);
     static bool isValidSunshineHost(std::string_view host);
+    // Accepts "host" and "host:port". Sunshine only publishes its HTTPS port once the
+    // plain HTTP probe succeeds, so the HTTP port has to travel with the address.
+    static std::optional<SunshineEndpoint> parseSunshineEndpoint(std::string_view endpoint);
+    static bool isValidSunshineEndpoint(std::string_view endpoint);
 
 private:
     static void validateExistingStorageDirectory(const std::filesystem::path& directory);

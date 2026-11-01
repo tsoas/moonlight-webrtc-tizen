@@ -1,3 +1,4 @@
+#include "media/Av1SequenceHeaderParser.h"
 #include "media/HevcSpsParser.h"
 #include "moonlight/MoonlightMediaBridge.h"
 
@@ -113,6 +114,54 @@ std::vector<std::uint8_t> syntheticMain10Sps()
         zeroCount = byte == 0 ? zeroCount + 1 : 0;
     }
     return nal;
+}
+
+// A key-frame temporal unit as Sunshine sends it: a temporal delimiter, a 1080p Main-profile
+// sequence header with BT.2020/PQ colour, and a stand-in frame OBU.
+std::vector<std::uint8_t> syntheticAv1TemporalUnit(bool tenBit)
+{
+    BitWriter writer;
+    writer.writeBits(0, 3);     // seq_profile: Main
+    writer.writeBits(0, 1);     // still_picture
+    writer.writeBits(0, 1);     // reduced_still_picture_header
+    writer.writeBits(0, 1);     // timing_info_present_flag
+    writer.writeBits(0, 1);     // initial_display_delay_present_flag
+    writer.writeBits(0, 5);     // operating_points_cnt_minus_1
+    writer.writeBits(0, 12);    // operating_point_idc[0]
+    writer.writeBits(9, 5);     // seq_level_idx[0]: 5.1
+    writer.writeBits(0, 1);     // seq_tier[0]
+    writer.writeBits(11, 4);    // frame_width_bits_minus_1
+    writer.writeBits(10, 4);    // frame_height_bits_minus_1
+    writer.writeBits(1919, 12); // max_frame_width_minus_1
+    writer.writeBits(1079, 11); // max_frame_height_minus_1
+    writer.writeBits(0, 1);     // frame_id_numbers_present_flag
+    writer.writeBits(0b011, 3); // 128x128 superblock, filter intra, intra edge filter
+    writer.writeBits(0, 4);     // interintra, masked compound, warped motion, dual filter
+    writer.writeBits(1, 1);     // enable_order_hint
+    writer.writeBits(0b01, 2);  // enable_jnt_comp, enable_ref_frame_mvs
+    writer.writeBits(1, 1);     // seq_choose_screen_content_tools
+    writer.writeBits(1, 1);     // seq_choose_integer_mv
+    writer.writeBits(6, 3);     // order_hint_bits_minus_1
+    writer.writeBits(0b011, 3); // superres, cdef, restoration
+    writer.writeBits(tenBit ? 1 : 0, 1); // high_bitdepth
+    writer.writeBits(0, 1);     // mono_chrome
+    writer.writeBits(1, 1);     // color_description_present_flag
+    writer.writeBits(9, 8);     // color_primaries: BT.2020
+    writer.writeBits(16, 8);    // transfer_characteristics: PQ
+    writer.writeBits(9, 8);     // matrix_coefficients: BT.2020 NCL
+    writer.writeBits(0, 1);     // color_range
+    writer.writeBits(0, 2);     // chroma_sample_position
+    writer.writeBits(0, 1);     // separate_uv_delta_q
+    writer.writeBits(0, 1);     // film_grain_params_present
+    writer.writeBits(1, 1);     // trailing_one_bit
+    const auto payload = writer.take();
+
+    std::vector<std::uint8_t> unit{0x12, 0x00};
+    unit.push_back(0x0A);
+    unit.push_back(static_cast<std::uint8_t>(payload.size()));
+    unit.insert(unit.end(), payload.begin(), payload.end());
+    unit.insert(unit.end(), {0x32, 0x02, 0xAB, 0xCD});
+    return unit;
 }
 
 } // namespace
@@ -419,6 +468,68 @@ int main()
                 "Verified HEVC bit depth diagnostic was not logged");
         hdrCallbacks->stop();
         hdrCallbacks->cleanup();
+
+        const auto av1Main10 = gateway::parseAv1SequenceHeader(syntheticAv1TemporalUnit(true));
+        require(av1Main10 && av1Main10->isMain10_420() && av1Main10->seqProfile == 0
+                    && av1Main10->bitDepth == 10 && av1Main10->chromaFormatIdc() == 1
+                    && av1Main10->colorPrimaries == 9
+                    && av1Main10->transferCharacteristics == 16,
+                "Synthetic AV1 Main 10-bit sequence header parser test failed");
+        const auto av1Main8 = gateway::parseAv1SequenceHeader(syntheticAv1TemporalUnit(false));
+        require(av1Main8 && av1Main8->bitDepth == 8 && !av1Main8->isMain10_420(),
+                "An 8-bit AV1 sequence header was taken for Main 10-bit");
+        const std::vector<std::uint8_t> av1InterFrame{0x12, 0x00, 0x32, 0x02, 0xAB, 0xCD};
+        require(!gateway::parseAv1SequenceHeader(av1InterFrame),
+                "A temporal unit without a sequence header must yield nothing");
+
+        RecordingMediaSender av1HdrSender;
+        auto av1HdrSettings = gateway::defaultStreamSettings(
+            1920, 1080, gateway::VideoCodec::AV1);
+        av1HdrSettings.hdr = true;
+        bool av1HdrValidationFailed = false;
+        gateway::MoonlightMediaBridge av1HdrBridge(
+            av1HdrSender,
+            av1HdrSettings,
+            [&logs](const std::string& message) { logs.push_back(message); },
+            [&av1HdrValidationFailed](const std::string&) {
+                av1HdrValidationFailed = true;
+            });
+        auto* av1HdrCallbacks = av1HdrBridge.videoCallbacks();
+        require(av1HdrCallbacks->setup(
+                    VIDEO_FORMAT_AV1_MAIN8, 1920, 1080, 60, &av1HdrBridge, 0)
+                    != 0,
+                "AV1 Main 8-bit must be rejected for an HDR session");
+        require(av1HdrCallbacks->setup(
+                    VIDEO_FORMAT_AV1_MAIN10, 1920, 1080, 60, &av1HdrBridge, 0)
+                    == 0,
+                "AV1 Main 10-bit HDR setup failed");
+        av1HdrCallbacks->start();
+        auto av1Unit = syntheticAv1TemporalUnit(true);
+        LENTRY av1Entry{nullptr,
+                        reinterpret_cast<char*>(av1Unit.data()),
+                        static_cast<int>(av1Unit.size()),
+                        BUFFER_TYPE_PICDATA};
+        DECODE_UNIT av1HdrUnit{};
+        av1HdrUnit.frameNumber = 300;
+        av1HdrUnit.frameType = FRAME_TYPE_IDR;
+        av1HdrUnit.rtpTimestamp = 270000;
+        av1HdrUnit.hdrActive = true;
+        av1HdrUnit.colorspace = COLORSPACE_REC_2020;
+        av1HdrUnit.fullLength = static_cast<int>(av1Unit.size());
+        av1HdrUnit.bufferList = &av1Entry;
+        require(av1HdrCallbacks->submitDecodeUnit(&av1HdrUnit) == DR_OK,
+                "Valid AV1 Main 10-bit HDR temporal unit was rejected");
+        require(av1HdrSender.video.size() == 1 && av1HdrSender.video[0].data == av1Unit,
+                "AV1 temporal unit was modified on its way to WebRTC");
+        const auto av1Diagnostics = av1HdrBridge.lastVideoFrame();
+        require(av1Diagnostics && av1Diagnostics->main10Verified
+                    && av1Diagnostics->bitDepthLuma == 10
+                    && av1Diagnostics->chromaFormatIdc == 1 && !av1HdrValidationFailed,
+                "AV1 HDR diagnostics were not propagated");
+        require(std::ranges::find(logs, "AV1 bit depth: 10") != logs.end(),
+                "Verified AV1 bit depth diagnostic was not logged");
+        av1HdrCallbacks->stop();
+        av1HdrCallbacks->cleanup();
 
         std::cout << "Moonlight media bridge tests passed\n";
         return 0;

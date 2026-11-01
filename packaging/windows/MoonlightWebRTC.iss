@@ -43,6 +43,12 @@ Name: "{group}\Moonlight WebRTC"; Filename: "{app}\moonlight_webrtc_tray.exe"; I
 Filename: "{app}\moonlight_webrtc_tray.exe"; Description: "Launch Moonlight WebRTC"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallDelete]
+; Leaving the service data behind strands a directory that only Administrators and
+; the now-deleted service SID can reach, and a later install has to reason about it.
+; An upgrade installs over the top without running the uninstaller, so the identity
+; only disappears when the user genuinely removes the product.
+Type: filesandordirs; Name: "{commonappdata}\MoonlightWebRTC"
+Type: filesandordirs; Name: "{commonappdata}\.MoonlightWebRTC.migration-staging"
 Type: dirifempty; Name: "{group}"
 
 [Code]

@@ -300,4 +300,124 @@ assert.strictEqual(triggerEffectCalls[0].effect, "dual-rumble",
   "BrightCraft-compatible rumble did not use dual-rumble");
 triggerManager.suspend(false);
 
+// The 120 Hz poll loop must resend only on real change, and must not rebuild the
+// diagnostics panel while it is hidden. Timers are stubbed so poll() can be driven
+// synchronously without leaving work pending.
+const pollControl = channel();
+const pollInput = channel();
+const pollDiagnostics = {
+  state: element(),
+  id: element(),
+  mapping: element(),
+  sendRate: element(),
+  lastSequence: element(),
+  controllers: element(),
+};
+const pollOverlay = element();
+let pollPanelVisible = true;
+
+const realSetTimeout = global.setTimeout;
+global.setTimeout = function () { return 0; };
+
+const pollManager = new global.GamepadInputManager({
+  controlChannel: function () { return pollControl; },
+  gamepadChannel: function () { return pollInput; },
+  isStreaming: function () { return true; },
+  log: function () {},
+  reportError: function (context, error) { throw new Error(context + ": " + error); },
+  diagnostics: pollDiagnostics,
+  isDiagnosticsVisible: function () { return pollPanelVisible; },
+  overlay: pollOverlay,
+  mouseOverlay: element(),
+  onStopShortcut: function () {},
+  onMouseModeChanged: function () {},
+});
+
+const pollPad = createGamepad(0, "Xbox Wireless Controller", null);
+gamepads = [pollPad];
+pollManager.resume();
+
+pollManager.poll();
+const afterFirstPoll = pollInput.messages.length;
+assert.ok(afterFirstPoll > 0, "the first poll must publish the controller state");
+pollManager.poll();
+assert.strictEqual(pollInput.messages.length, afterFirstPoll,
+  "an unchanged controller state must not be resent");
+
+pollPad.buttons[0] = { pressed: true, value: 1 };
+pollManager.poll();
+assert.strictEqual(pollInput.messages.length, afterFirstPoll + 1,
+  "a changed controller state must be sent");
+assert.notStrictEqual(pollInput.messages[pollInput.messages.length - 1].buttons, 0,
+  "the pressed button was lost by field-wise change detection");
+
+pollPanelVisible = false;
+pollDiagnostics.controllers.textContent = "";
+pollManager.updateDiagnostics();
+assert.strictEqual(pollDiagnostics.controllers.textContent, "",
+  "a hidden diagnostics panel must not be rendered");
+
+pollPanelVisible = true;
+pollManager.updateDiagnostics();
+assert.ok(pollDiagnostics.controllers.textContent.indexOf("Controller ") >= 0,
+  "an opened diagnostics panel must render on the next update");
+
+pollPanelVisible = false;
+gamepads = [];
+pollManager.poll();
+assert.strictEqual(pollOverlay.textContent, "Disconnected",
+  "the controller overlay must keep tracking while the panel is hidden");
+
+pollManager.suspend(false);
+
+// send() throws when the channel closes between the readyState check and the call, and
+// when its buffer is full. That exception used to escape poll(), which then never
+// rescheduled itself, so the controller stopped responding for the rest of the session
+// while audio and video carried on.
+function pollHarness(gamepadChannel) {
+  return new global.GamepadInputManager({
+    controlChannel: function () { return pollControl; },
+    gamepadChannel: function () { return gamepadChannel; },
+    isStreaming: function () { return true; },
+    log: function () {},
+    reportError: function (context, error) { throw new Error(context + ": " + error); },
+    diagnostics: pollDiagnostics,
+    isDiagnosticsVisible: function () { return false; },
+    overlay: element(),
+    mouseOverlay: element(),
+    onStopShortcut: function () {},
+    onMouseModeChanged: function () {},
+  });
+}
+
+const hostileInput = channel();
+hostileInput.send = function () { throw new Error("InvalidStateError"); };
+const hostileManager = pollHarness(hostileInput);
+gamepads = [createGamepad(0, "Xbox Wireless Controller", null)];
+hostileManager.resume();
+assert.doesNotThrow(function () { hostileManager.poll(); },
+  "a rejected DataChannel payload must not escape the poll loop");
+assert.notStrictEqual(hostileManager.pollTimer, null,
+  "the poll loop must reschedule itself after a failed send");
+hostileManager.suspend(false);
+
+const congestedInput = channel();
+congestedInput.bufferedAmount = 4 * 1024 * 1024;
+const congestedManager = pollHarness(congestedInput);
+gamepads = [createGamepad(0, "Xbox Wireless Controller", null)];
+congestedManager.resume();
+congestedManager.poll();
+assert.strictEqual(congestedInput.messages.length, 0,
+  "a congested channel must drop states rather than queue more of them");
+assert.notStrictEqual(congestedManager.pollTimer, null,
+  "dropping a congested state must leave the poll loop running");
+congestedInput.bufferedAmount = 0;
+congestedManager.poll();
+assert.strictEqual(congestedInput.messages.length, 1,
+  "the controller must recover as soon as the channel drains");
+congestedManager.suspend(false);
+
+gamepads = [];
+global.setTimeout = realSetTimeout;
+
 console.log("Tizen gamepad input tests passed");

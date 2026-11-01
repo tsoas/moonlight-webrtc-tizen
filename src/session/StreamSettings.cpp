@@ -10,6 +10,7 @@ namespace {
 inline constexpr std::array AllVideoCodecs{
     VideoCodec::H264,
     VideoCodec::HEVC,
+    VideoCodec::AV1,
 };
 
 } // namespace
@@ -31,13 +32,15 @@ bool videoModeSupportsCodec(const VideoMode& mode, VideoCodec codec)
         return mode.supportsH264;
     case VideoCodec::HEVC:
         return mode.supportsHevc;
+    case VideoCodec::AV1:
+        return mode.supportsAv1;
     }
     return false;
 }
 
 bool videoModeSupportsHdr(const VideoMode& mode, VideoCodec codec)
 {
-    return mode.supportsHdr && codec == VideoCodec::HEVC;
+    return mode.supportsHdr && (codec == VideoCodec::HEVC || codec == VideoCodec::AV1);
 }
 
 std::span<const VideoCodec> supportedVideoCodecs()
@@ -75,7 +78,7 @@ std::optional<std::string> validateStreamSettings(const StreamSettings& settings
         return "Unsupported resolution and codec combination";
     }
     if (settings.hdr && !videoModeSupportsHdr(*mode, settings.codec)) {
-        return "HDR is supported only with HEVC at 1080p60, 1440p60, or 4K60";
+        return "HDR is supported only with HEVC or AV1 at 1080p60, 1440p60, or 4K60";
     }
     if (settings.audioChannels != 2) {
         return "Only stereo audio is supported";
@@ -94,6 +97,8 @@ std::string_view videoCodecName(VideoCodec codec)
         return "h264";
     case VideoCodec::HEVC:
         return "hevc";
+    case VideoCodec::AV1:
+        return "av1";
     }
     return "unknown";
 }
@@ -105,6 +110,8 @@ std::string_view videoCodecDisplayName(VideoCodec codec)
         return "H.264";
     case VideoCodec::HEVC:
         return "HEVC (H.265)";
+    case VideoCodec::AV1:
+        return "AV1";
     }
     return "Unknown";
 }
@@ -120,6 +127,9 @@ std::optional<VideoCodec> parseVideoCodec(std::string_view name)
     }
     if (lowercase == "hevc") {
         return VideoCodec::HEVC;
+    }
+    if (lowercase == "av1") {
+        return VideoCodec::AV1;
     }
     return std::nullopt;
 }

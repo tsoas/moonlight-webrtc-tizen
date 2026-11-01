@@ -3,6 +3,8 @@
 const assert = require("assert");
 
 global.window = global;
+require("../tizen/wake-on-lan.js");
+require("../tizen/gateway-auth.js");
 require("../tizen/gateway-store.js");
 require("../tizen/gateway-ipv4.js");
 
@@ -43,6 +45,29 @@ persistentStorage.setItem(global.GatewayStore.STORAGE_KEY, JSON.stringify([
 assert.deepStrictEqual(global.GatewayStore.create(persistentStorage).load(), [{
   id: "198.51.100.4:8000", host: "198.51.100.4", port: 8000, name: "Valid",
 }], "malformed and duplicate stored Gateways must be ignored safely");
+
+const wakeable = global.GatewayStore.create(storage());
+assert.strictEqual(wakeable.upsert({ host: "192.0.2.10", name: "PC", macAddress: "2c-f0-5d-7b-e6-d0" }).macAddress,
+  "2C:F0:5D:7B:E6:D0", "a Gateway must keep the canonical form of its Wake-on-LAN address");
+assert.strictEqual(wakeable.upsert({ host: "192.0.2.10", name: "PC", macAddress: "00:00:00:00:00:00" }).macAddress,
+  undefined, "an address that cannot be woken must not be stored");
+assert.ok(!Object.prototype.hasOwnProperty.call(wakeable.upsert({ host: "192.0.2.11", name: "Old PC" }), "macAddress"),
+  "a Gateway that never reported its address must store none");
+
+const paired = global.GatewayStore.create(storage());
+const clientId = "00112233445566778899aabbccddeeff";
+const clientSecret = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const pairedGateway = paired.upsert({ host: "192.0.2.12", name: "PC", clientId: clientId, clientSecret: clientSecret });
+assert.strictEqual(pairedGateway.clientId, clientId, "a paired Gateway must keep its client ID");
+assert.strictEqual(pairedGateway.clientSecret, clientSecret, "a paired Gateway must keep its secret");
+assert.strictEqual(paired.replace(pairedGateway.id, Object.assign({}, pairedGateway, { host: "192.0.2.13" })).clientId,
+  clientId, "changing a Gateway's address must not lose its pairing");
+const halfPaired = paired.upsert({ host: "192.0.2.14", name: "PC", clientId: clientId });
+assert.ok(!Object.prototype.hasOwnProperty.call(halfPaired, "clientId"),
+  "a client ID without its secret is useless and must not be stored");
+assert.ok(!Object.prototype.hasOwnProperty.call(
+  paired.upsert({ host: "192.0.2.15", name: "PC", clientId: "xyz", clientSecret: clientSecret }), "clientSecret"),
+  "malformed credentials must not be stored");
 
 assert.deepStrictEqual(global.GatewayIpv4.parse(""), [192, 168, 0, 0],
   "the IPv4 editor must default to 192.168.0.0");

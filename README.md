@@ -82,6 +82,10 @@ The current beta streams at a fixed **60 FPS** and supports several resolution a
 | H.264 | ✅ | ✅ | — | — |
 | HEVC Main | ✅ | ✅ | 🧪 | ✅ |
 | HEVC Main10 HDR | — | ✅ | 🧪 | ✅ |
+| AV1 Main 8-bit ¹ | ✅ | ✅ | 🧪 | ✅ |
+| AV1 Main 10-bit HDR ¹ | — | ✅ | 🧪 | ✅ |
+
+¹ **AV1 is offered only when the PC's GPU can encode it and the TV can decode it over WebRTC.**
 
 🧪 **1440p is currently considered experimental.**
 
@@ -93,7 +97,7 @@ Resolution, codec, HDR mode and bitrate are selectable directly from the TV.
 
 ## 🌈 HDR
 
-Moonlight WebRTC supports **HEVC Main10 HDR** streaming without tone mapping or video transcoding in the Gateway.
+Moonlight WebRTC supports **HEVC Main10 and AV1 Main 10-bit HDR** streaming without tone mapping or video transcoding in the Gateway.
 
 The HDR path preserves the Main10 stream and Rec.2020 signaling through to the Samsung TV.
 
@@ -130,7 +134,7 @@ Moonlight WebRTC instead uses this path:
 ```text
 Sunshine
    ↓
-H.264 / HEVC encoded video
+H.264 / HEVC / AV1 encoded video
    ↓
 Moonlight WebRTC Gateway
 packetize / forward
@@ -187,6 +191,7 @@ It includes:
 
 - multiple saved Gateways;
 - online/offline Gateway status;
+- Wake-on-LAN for a sleeping or powered-off Gateway PC;
 - remote-friendly IPv4 editing;
 - Sunshine application artwork;
 - resolution selection;
@@ -202,6 +207,21 @@ No keyboard is required for normal use.
 
 ---
 
+## ⏻ Wake-on-LAN
+
+The TV can turn on a Gateway PC that is asleep or shut down.
+
+Select an offline Gateway and the TV sends a Wake-on-LAN magic packet, waits for the PC to boot and opens its library once the Gateway answers. **Wake PC** is also available from the Gateway menu (the controller's Menu button).
+
+The TV learns the PC's network adapter address the first time it connects to that Gateway, so connect once while the PC is on. Wake-on-LAN also has to be enabled on the PC:
+
+- in the BIOS/UEFI (often called *Wake on LAN*, *Power On By PCI-E* or *Resume by LAN*; waking from a full shutdown may also need *ErP* disabled);
+- in Windows, under the network adapter's **Properties → Power Management** (*Allow this device to wake the computer*, *Only allow a magic packet to wake the computer*) and **Advanced** (*Wake on Magic Packet*).
+
+Use wired Ethernet on the PC: most Wi-Fi adapters cannot wake a computer. The TV and PC must be on the same local network.
+
+---
+
 ## 🖥️ Windows Gateway and tray application
 
 The Gateway runs as a Windows service, so it is available independently of the desktop UI.
@@ -214,6 +234,7 @@ From the tray you can:
 - test the Sunshine connection;
 - pair with Sunshine;
 - unpair;
+- pair a TV with the Gateway, or forget every paired TV;
 - inspect Gateway status;
 - inspect network and session information.
 
@@ -340,6 +361,11 @@ Open the **Moonlight WebRTC** tray application.
 
 Go to **Sunshine**, configure the Sunshine host and select **Test Connection**.
 
+The host field takes the address of the machine running Sunshine — a hostname or an IPv4
+address, such as `192.168.1.20`. This is not the name Sunshine displays for itself, which
+is only a label. If Sunshine runs on a non-default port, append it: `192.168.1.20:27786`.
+Use the base HTTP port from Sunshine's own configuration; the Gateway derives the rest.
+
 Then select **Pair** and complete the PIN pairing with Sunshine.
 
 Pairing normally only needs to be performed once.
@@ -361,6 +387,8 @@ Open Moonlight WebRTC on the Samsung TV.
 Gateway discovery is not available yet, so select **Add Gateway** and enter the LAN IPv4 address of the Windows PC running the Gateway.
 
 The TV and PC must be reachable on the same local network.
+
+The first time, the TV asks for a PIN. On the PC, open Moonlight WebRTC from the system tray, choose **TVs → Pair TV**, and enter the four-digit PIN it shows on the TV within two minutes. Each TV pairs once; the Gateway refuses TVs that have not paired, so other devices on your network cannot use it or interrupt your stream.
 
 Once connected, your Sunshine application library should appear. Select an application and start streaming.
 
@@ -434,7 +462,7 @@ The Gateway stores its identity and Sunshine pairing information in:
 %PROGRAMDATA%\MoonlightWebRTC
 ```
 
-This directory contains sensitive client identity material, including the Gateway certificate/private key and Sunshine pairing state.
+This directory contains sensitive client identity material, including the Gateway certificate/private key, Sunshine pairing state, and the credentials of paired TVs (`tv-clients.json`).
 
 **Do not share or publish this directory.**
 
@@ -451,7 +479,6 @@ Current known limitations include:
 - streaming is currently fixed at **60 FPS**;
 - Gateway auto-discovery is not implemented;
 - Gateways must currently be added manually by IPv4 address;
-- Wake-on-LAN is not implemented;
 - 1440p support is experimental;
 - automatic application updates are not currently provided.
 
@@ -473,6 +500,22 @@ Check that:
 The Windows installer creates the required local-subnet firewall rule automatically.
 
 **Do not disable Windows Firewall as a troubleshooting step.**
+
+## The TV keeps asking for a PIN
+
+The Gateway no longer recognizes the TV, for example after **Forget all TVs** or a reset of the Gateway data. Pair it again from **TVs → Pair TV** in the tray. A PIN is valid for two minutes and three attempts; start again on the PC if it expires.
+
+If the TV reports that the Gateway is out of date, update the Windows Gateway: the TV app and the Gateway must both be recent enough to support TV pairing.
+
+## The PC does not wake up
+
+Check that:
+
+- the TV has connected to this Gateway at least once while the PC was on;
+- Wake-on-LAN is enabled in the PC's BIOS/UEFI and network adapter settings (see [Wake-on-LAN](#-wake-on-lan));
+- the PC is connected by Ethernet rather than Wi-Fi.
+
+If the PC wakes from sleep but not from a shutdown, look for a BIOS option allowing Wake-on-LAN from a powered-off state (and disable *ErP*), or try turning off Windows **Fast startup**.
 
 ## Sunshine is not paired
 
@@ -518,6 +561,8 @@ Compare the results with the hashes contained in `SHA256SUMS.txt`.
 The project uses C++20, CMake, `moonlight-common-c`, `libdatachannel`, OpenSSL, libcurl, pugixml and Samsung Tizen tooling.
 
 The Windows Gateway and Samsung TV application have separate packaging pipelines.
+
+The TV package also needs [Samsung's Emscripten SDK](https://developer.samsung.com/smarttv/develop/extension-libraries/webassembly/download.html) (1.39.4.7) to build its Wake-on-LAN WebAssembly module. `packaging/tizen/build-package.ps1` looks for it in `%USERPROFILE%\samsung-emscripten\emscripten-release-bundle\emsdk`; pass `-EmsdkRoot` or set `SAMSUNG_EMSDK` to use another location.
 
 For GPL-compliant release source, each release also includes `MoonlightWebRTC-Source.tar.gz`, containing the corresponding Moonlight WebRTC source and the exact `moonlight-common-c` revision used by that release.
 

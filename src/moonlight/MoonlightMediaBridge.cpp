@@ -1,5 +1,6 @@
 #include "moonlight/MoonlightMediaBridge.h"
 
+#include "media/Av1SequenceHeaderParser.h"
 #include "media/HevcSpsParser.h"
 #include "moonlight/MoonlightVideoProfile.h"
 
@@ -208,6 +209,10 @@ int MoonlightMediaBridge::setupVideo(int videoFormat,
         ? "HEVC RExt 8-bit 4:4:4"
         : videoFormat == VIDEO_FORMAT_H265_REXT10_444
         ? "HEVC RExt 10-bit 4:4:4"
+        : videoFormat == VIDEO_FORMAT_AV1_MAIN8
+        ? "AV1 Main 8-bit"
+        : videoFormat == VIDEO_FORMAT_AV1_MAIN10
+        ? "AV1 Main 10-bit"
         : "unexpected";
     std::ostringstream message;
     message << "Moonlight video setup: " << width << 'x' << height << " @ " << redrawRate
@@ -263,7 +268,10 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
             observedRec2020_.store(true, std::memory_order_release);
         }
 
-        if (!main10Verified_.load(std::memory_order_acquire)) {
+        if (!main10Verified_.load(std::memory_order_acquire)
+            && settings_.codec == VideoCodec::AV1) {
+            verifyAv1Main10(*flattened);
+        } else if (!main10Verified_.load(std::memory_order_acquire)) {
             if (const auto sps = parseHevcSps(*flattened)) {
                 bitDepthLuma_.store(sps->bitDepthLuma, std::memory_order_release);
                 bitDepthChroma_.store(sps->bitDepthChroma, std::memory_order_release);
@@ -305,7 +313,7 @@ int MoonlightMediaBridge::submitVideo(PDECODE_UNIT decodeUnit)
             reason << "HDR validation timed out (hdrActive="
                    << (observedHdrActive_.load() ? "true" : "false")
                    << ", Rec.2020=" << (observedRec2020_.load() ? "true" : "false")
-                   << ", Main10 SPS=" << (main10Verified_.load() ? "true" : "false")
+                   << ", Main10 bitstream=" << (main10Verified_.load() ? "true" : "false")
                    << ')';
             failHdrValidation(reason.str());
         }
@@ -455,6 +463,32 @@ std::optional<std::vector<std::uint8_t>> MoonlightMediaBridge::flattenDecodeUnit
     }
 
     return flattened;
+}
+
+// The AV1 counterpart of the HEVC SPS check: the sequence header leads every key frame.
+void MoonlightMediaBridge::verifyAv1Main10(std::span<const std::uint8_t> temporalUnit)
+{
+    const auto header = parseAv1SequenceHeader(temporalUnit);
+    if (!header) {
+        return;
+    }
+    bitDepthLuma_.store(header->bitDepth, std::memory_order_release);
+    bitDepthChroma_.store(header->bitDepth, std::memory_order_release);
+    chromaFormatIdc_.store(header->chromaFormatIdc(), std::memory_order_release);
+    std::ostringstream message;
+    message << "AV1 sequence header: seq_profile=" << header->seqProfile
+            << ", bit_depth=" << header->bitDepth
+            << ", chroma_format_idc=" << header->chromaFormatIdc()
+            << ", color_primaries=" << header->colorPrimaries.value_or(-1)
+            << ", transfer=" << header->transferCharacteristics.value_or(-1)
+            << ", matrix=" << header->matrixCoefficients.value_or(-1);
+    log(message.str());
+    if (!header->isMain10_420()) {
+        failHdrValidation("HDR AV1 sequence header is not Main 10-bit 4:2:0");
+        return;
+    }
+    main10Verified_.store(true, std::memory_order_release);
+    log("AV1 bit depth: 10");
 }
 
 void MoonlightMediaBridge::failHdrValidation(const std::string& message)

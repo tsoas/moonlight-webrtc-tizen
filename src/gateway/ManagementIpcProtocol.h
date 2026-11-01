@@ -10,7 +10,7 @@ namespace gateway::managementipc {
 inline constexpr std::uint32_t ProtocolVersion = 1;
 inline constexpr std::size_t MaximumMessageBytes = 16 * 1024;
 
-enum class CommandType { SetHost, Test, Pair, PairStatus, Unpair };
+enum class CommandType { SetHost, Test, Pair, PairStatus, Unpair, PairTv, PairTvStatus, UnpairTvs };
 
 struct Command {
     CommandType type;

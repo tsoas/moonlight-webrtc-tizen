@@ -69,8 +69,10 @@ void showMenu(HWND window, TrayState& state)
     std::wstring sunshine = L"Sunshine: Disconnected";
     if (status.status && status.status->sunshineConnected && *status.status->sunshineConnected) {
         sunshine = L"Sunshine: Connected";
-        if (status.status->sunshineHost) {
-            sunshine += L" (" + widen(*status.status->sunshineHost) + L")";
+        const auto& label = status.status->sunshineName ? status.status->sunshineName
+                                                        : status.status->sunshineHost;
+        if (label) {
+            sunshine += L" (" + widen(*label) + L")";
         }
     }
     AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, sunshine.c_str());

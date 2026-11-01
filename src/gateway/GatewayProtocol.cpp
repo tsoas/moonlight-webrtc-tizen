@@ -16,7 +16,7 @@ void requireVersion(const Json& message)
 {
     if (!message.contains("version") || !message.at("version").is_number_integer()
         || message.at("version").get<int>() != Version) {
-        throw ProtocolError("unsupported-version", "Protocol version 1 is required");
+        throw ProtocolError("unsupported-version", "Protocol version 2 is required");
     }
 }
 
@@ -77,12 +77,19 @@ Json settingsJson(const StreamSettings& settings)
     };
 }
 
-Json videoModeJson(const VideoMode& mode)
+Json videoModeJson(const VideoMode& mode, const EncoderSupport& encoders)
 {
     Json codecs = Json::array();
+    Json hdrCodecs = Json::array();
     for (const auto codec : supportedVideoCodecs()) {
-        if (videoModeSupportsCodec(mode, codec)) {
-            codecs.push_back(videoCodecName(codec));
+        if (!videoModeSupportsCodec(mode, codec)
+            || (codec == VideoCodec::AV1 && !encoders.av1)) {
+            continue;
+        }
+        codecs.push_back(videoCodecName(codec));
+        if (videoModeSupportsHdr(mode, codec)
+            && (codec != VideoCodec::AV1 || encoders.av1Hdr)) {
+            hdrCodecs.push_back(videoCodecName(codec));
         }
     }
     return {
@@ -90,6 +97,7 @@ Json videoModeJson(const VideoMode& mode)
         {"height", mode.height},
         {"fps", mode.fps},
         {"codecs", std::move(codecs)},
+        {"hdrCodecs", std::move(hdrCodecs)},
         {"defaultCodec", videoCodecName(mode.defaultCodec)},
         {"defaultBitrateKbps", mode.defaultBitrateKbps},
         {"experimental", mode.experimental},
@@ -123,6 +131,25 @@ ClientMessage parseClientMessage(std::string_view text)
     try {
         requireVersion(message);
         const auto type = message.at("type").get<std::string>();
+        if (type == "authenticate") {
+            const auto clientId = message.at("clientId").get<std::string>();
+            const auto proof = message.at("proof").get<std::string>();
+            if (clientId.empty() || clientId.size() > 64 || proof.empty() || proof.size() > 128) {
+                throw ProtocolError("invalid-message", "clientId and proof are required");
+            }
+            return {type, AuthenticateRequest{clientId, proof}};
+        }
+        if (type == "pair-client") {
+            const auto pin = message.at("pin").get<std::string>();
+            if (pin.size() != 4) {
+                throw ProtocolError("invalid-message", "pin must have four digits");
+            }
+            std::string clientName;
+            if (message.contains("clientName")) {
+                clientName = message.at("clientName").get<std::string>();
+            }
+            return {type, PairClientRequest{pin, clientName}};
+        }
         if (type == "get-apps") {
             return {type, GetAppsRequest{}};
         }
@@ -181,6 +208,40 @@ ClientMessage parseClientMessage(std::string_view text)
     }
 }
 
+Json makeAuthRequired(std::string_view nonce,
+                      const std::optional<std::string>& macAddress,
+                      std::optional<bool> sunshineAvailable)
+{
+    auto message = envelope("auth-required");
+    message["nonce"] = nonce;
+    if (macAddress) {
+        message["macAddress"] = *macAddress;
+    }
+    if (sunshineAvailable) {
+        message["sunshineAvailable"] = *sunshineAvailable;
+    }
+    return message;
+}
+
+Json makeSunshineAvailability(bool sunshineAvailable)
+{
+    auto message = envelope("sunshine-availability");
+    message["sunshineAvailable"] = sunshineAvailable;
+    return message;
+}
+
+Json makeAuthenticated()
+{
+    return envelope("authenticated");
+}
+
+Json makePaired(std::string_view clientId, std::string_view clientSecret)
+{
+    auto message = envelope("paired");
+    message.update({{"clientId", clientId}, {"clientSecret", clientSecret}});
+    return message;
+}
+
 Json makeGatewayStatus(const GatewayStatus& status)
 {
     auto message = envelope("gateway-status");
@@ -191,16 +252,19 @@ Json makeGatewayStatus(const GatewayStatus& status)
     if (status.runningAppId) {
         message["runningAppId"] = *status.runningAppId;
     }
+    if (status.macAddress) {
+        message["macAddress"] = *status.macAddress;
+    }
     return message;
 }
 
-Json makeCapabilities()
+Json makeCapabilities(const EncoderSupport& encoders)
 {
     auto message = envelope("capabilities");
     message["videoModes"] = Json::array();
     message["resolutions"] = Json::array();
     for (const auto& mode : SupportedVideoModes) {
-        message["videoModes"].push_back(videoModeJson(mode));
+        message["videoModes"].push_back(videoModeJson(mode, encoders));
         message["resolutions"].push_back({
             {"width", mode.width},
             {"height", mode.height},
@@ -209,7 +273,8 @@ Json makeCapabilities()
     }
     message.update({
         {"frameRates", {60}},
-        {"codecs", {"h264", "hevc"}},
+        {"codecs",
+         encoders.av1 ? Json::array({"h264", "hevc", "av1"}) : Json::array({"h264", "hevc"})},
         {"hdr", true},
         {"audio", "stereo"},
         {"audioSampleRate", 48000},

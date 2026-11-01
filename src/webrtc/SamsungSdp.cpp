@@ -109,16 +109,29 @@ bool hasExpectedVideoCodec(std::string_view sdp,
     if (section.empty()) {
         return false;
     }
-    const auto payload = std::to_string(payloadType);
-    const auto expected = "a=rtpmap:" + payload + " "
-        + (codec == VideoCodec::HEVC ? "H265/90000" : "H264/90000");
+    const auto rtpmapName = [](VideoCodec candidate) -> std::string_view {
+        switch (candidate) {
+        case VideoCodec::H264:
+            return "H264/90000";
+        case VideoCodec::HEVC:
+            return "H265/90000";
+        case VideoCodec::AV1:
+            return "AV1/90000";
+        }
+        return {};
+    };
+    const auto expected = "a=rtpmap:" + std::to_string(payloadType) + " "
+        + std::string(rtpmapName(codec));
     if (section.find(expected) == std::string_view::npos) {
         return false;
     }
-    if (codec == VideoCodec::HEVC) {
-        return section.find("H264/90000") == std::string_view::npos;
+    // The offer must carry the requested codec alone, so the TV cannot answer another one.
+    for (const auto other : supportedVideoCodecs()) {
+        if (other != codec && section.find(rtpmapName(other)) != std::string_view::npos) {
+            return false;
+        }
     }
-    return section.find("H265/90000") == std::string_view::npos;
+    return true;
 }
 
 std::optional<std::string> hevcFormatParameters(const StreamSettings& settings)

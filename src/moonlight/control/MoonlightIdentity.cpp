@@ -1,5 +1,6 @@
 #include "moonlight/control/MoonlightIdentity.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cctype>
 #include <fstream>
@@ -7,6 +8,8 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
+#include <vector>
 
 #include <ShlObj.h>
 #include <sddl.h>
@@ -92,6 +95,52 @@ int identityFileCount(const std::filesystem::path& directory)
     return static_cast<int>(std::filesystem::exists(identityPath(directory, "client-certificate.pem")))
         + static_cast<int>(std::filesystem::exists(identityPath(directory, "client-private-key.pem")))
         + static_cast<int>(std::filesystem::exists(identityPath(directory, "client-unique-id.txt")));
+}
+
+bool isDiscardableResidue(const std::filesystem::directory_entry& entry)
+{
+    // The service regenerates both of these beside the identity, so neither carries
+    // anything a reinstall needs to keep.
+    static constexpr std::string_view Discardable[] = {
+        "gateway-service.log",
+        "sunshine-host.txt",
+    };
+
+    std::error_code error;
+    if (!entry.is_regular_file(error) || error) {
+        return false;
+    }
+    const auto name = entry.path().filename().string();
+    return std::find(std::begin(Discardable), std::end(Discardable), name)
+        != std::end(Discardable);
+}
+
+void discardResidue(const std::filesystem::path& directory)
+{
+    // An uninstall left incomplete, or a disk cleaner, can strip the identity while
+    // leaving the generated bookkeeping behind. That residue is not a paired
+    // installation, so clearing it keeps the next install on the fresh-install path
+    // instead of failing service configuration. A partial identity, or any file this
+    // does not recognize, is left untouched for the caller to refuse.
+    if (identityFileCount(directory) != 0) {
+        return;
+    }
+
+    std::vector<std::filesystem::path> residue;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (!isDiscardableResidue(entry)) {
+            return;
+        }
+        residue.push_back(entry.path());
+    }
+
+    for (const auto& path : residue) {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        if (error) {
+            throw std::runtime_error("Unable to clear stale Gateway data: " + error.message());
+        }
+    }
 }
 
 bool isEmptyDirectory(const std::filesystem::path& directory)
@@ -241,9 +290,22 @@ MoonlightIdentityMigrationResult MoonlightIdentity::migrateStorageDirectory(
         validateExistingStorageDirectory(destinationDirectory);
         return MoonlightIdentityMigrationResult::DestinationAuthoritative;
     }
+    if (destinationExists) {
+        discardResidue(destinationDirectory);
+    }
     if (destinationExists && !isEmptyDirectory(destinationDirectory)) {
         throw std::runtime_error(
             "Gateway data destination is populated but has no valid complete identity; refusing to merge");
+    }
+
+    std::error_code sameDirectoryError;
+    if (destinationExists
+        && std::filesystem::equivalent(sourceDirectory, destinationDirectory, sameDirectoryError)
+        && !sameDirectoryError) {
+        // Service configuration validates the data directory against itself. An empty
+        // destination has nothing to migrate and nothing left worth preserving, so the
+        // service is free to create a new identity on first start.
+        return MoonlightIdentityMigrationResult::DestinationAuthoritative;
     }
 
     validateExistingStorageDirectory(sourceDirectory);
@@ -476,6 +538,10 @@ std::optional<PairedSunshineHost> MoonlightIdentity::pairedHost(
         iterator->at("lastAddress").get<std::string>(),
         iterator->at("httpsPort").get<std::uint16_t>(),
         iterator->at("serverCertificatePem").get<std::string>(),
+        // Pairings written before custom ports were supported can only have used the
+        // default, so their absence is not a broken record.
+        iterator->contains("httpPort") ? iterator->at("httpPort").get<std::uint16_t>()
+                                       : DefaultSunshineHttpPort,
     };
 }
 
@@ -490,6 +556,7 @@ void MoonlightIdentity::savePairedHost(const PairedSunshineHost& host)
         {"hostname", host.hostname},
         {"lastAddress", host.lastAddress},
         {"httpsPort", host.httpsPort},
+        {"httpPort", host.httpPort},
         {"serverCertificatePem", host.serverCertificatePem},
     };
     writeTextFile(hostsPath_, hosts.dump(2) + "\n");
@@ -514,10 +581,44 @@ std::optional<std::string> MoonlightIdentity::configuredSunshineHost() const
 
 void MoonlightIdentity::saveConfiguredSunshineHost(const std::string& host)
 {
-    if (!isValidSunshineHost(host)) {
+    if (!isValidSunshineEndpoint(host)) {
         throw std::invalid_argument("Invalid Sunshine host");
     }
     writeTextFile(sunshineHostPath_, host + "\n");
+}
+
+std::optional<SunshineEndpoint> MoonlightIdentity::parseSunshineEndpoint(std::string_view endpoint)
+{
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string_view::npos) {
+        if (!isValidSunshineHost(endpoint)) {
+            return std::nullopt;
+        }
+        return SunshineEndpoint{std::string(endpoint), DefaultSunshineHttpPort};
+    }
+
+    const auto host = endpoint.substr(0, separator);
+    const auto port = endpoint.substr(separator + 1);
+    if (!isValidSunshineHost(host) || port.empty() || port.size() > 5) {
+        return std::nullopt;
+    }
+
+    unsigned value = 0;
+    for (const char digit : port) {
+        if (digit < '0' || digit > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + static_cast<unsigned>(digit - '0');
+    }
+    if (value == 0 || value > 65535) {
+        return std::nullopt;
+    }
+    return SunshineEndpoint{std::string(host), static_cast<std::uint16_t>(value)};
+}
+
+bool MoonlightIdentity::isValidSunshineEndpoint(std::string_view endpoint)
+{
+    return parseSunshineEndpoint(endpoint).has_value();
 }
 
 bool MoonlightIdentity::isValidSunshineHost(std::string_view host)

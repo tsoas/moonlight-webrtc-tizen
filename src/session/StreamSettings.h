@@ -11,6 +11,7 @@ namespace gateway {
 enum class VideoCodec {
     H264,
     HEVC,
+    AV1,
 };
 
 struct VideoMode {
@@ -19,6 +20,8 @@ struct VideoMode {
     int fps;
     bool supportsH264;
     bool supportsHevc;
+    // Offered only when Sunshine also advertises an AV1 encoder; see makeCapabilities.
+    bool supportsAv1;
     VideoCodec defaultCodec;
     int defaultBitrateKbps;
     bool experimental;
@@ -38,10 +41,10 @@ struct StreamSettings {
 };
 
 inline constexpr std::array SupportedVideoModes{
-    VideoMode{1280, 720, 60, true, true, VideoCodec::H264, 12000, false, false},
-    VideoMode{1920, 1080, 60, true, true, VideoCodec::H264, 20000, false, true},
-    VideoMode{2560, 1440, 60, true, true, VideoCodec::HEVC, 30000, true, true},
-    VideoMode{3840, 2160, 60, false, true, VideoCodec::HEVC, 50000, false, true},
+    VideoMode{1280, 720, 60, true, true, true, VideoCodec::H264, 12000, false, false},
+    VideoMode{1920, 1080, 60, true, true, true, VideoCodec::H264, 20000, false, true},
+    VideoMode{2560, 1440, 60, true, true, true, VideoCodec::HEVC, 30000, true, true},
+    VideoMode{3840, 2160, 60, false, true, true, VideoCodec::HEVC, 50000, false, true},
 };
 
 inline constexpr std::array SupportedBitratesKbps{
@@ -53,6 +56,10 @@ inline constexpr std::array SupportedBitratesKbps{
     30000,
     40000,
     50000,
+    // Above 50 Mbps a wired TV may hit its 100 Mbps Ethernet port; Wi-Fi 5/6 can do better.
+    60000,
+    80000,
+    100000,
 };
 
 const VideoMode* findVideoMode(int width, int height, int fps = 60);

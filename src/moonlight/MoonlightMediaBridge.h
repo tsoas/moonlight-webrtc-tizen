@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,7 @@ private:
     int setupAudio(const POPUS_MULTISTREAM_CONFIGURATION opusConfig, int arFlags);
     void submitAudio(char* sampleData, int sampleLength);
     std::optional<std::vector<std::uint8_t>> flattenDecodeUnit(PDECODE_UNIT decodeUnit);
+    void verifyAv1Main10(std::span<const std::uint8_t> temporalUnit);
     void failHdrValidation(const std::string& message);
     void log(const std::string& message);
 

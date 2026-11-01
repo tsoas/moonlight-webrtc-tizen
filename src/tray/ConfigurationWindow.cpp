@@ -34,6 +34,9 @@ constexpr UINT SaveHostCommandId = 301;
 constexpr UINT TestHostCommandId = 302;
 constexpr UINT PairCommandId = 303;
 constexpr UINT UnpairCommandId = 304;
+constexpr UINT PairTvCommandId = 305;
+constexpr UINT ForgetTvsCommandId = 306;
+constexpr int TvButtonsTop = 212;
 constexpr UINT ManagementResultMessage = WM_APP + 31;
 
 struct PageDefinition {
@@ -44,6 +47,7 @@ struct PageDefinition {
 constexpr std::array Pages{
     PageDefinition{ConfigurationWindow::Page::Status, L"Status"},
     PageDefinition{ConfigurationWindow::Page::Sunshine, L"Sunshine"},
+    PageDefinition{ConfigurationWindow::Page::Tvs, L"TVs"},
     PageDefinition{ConfigurationWindow::Page::Network, L"Network"},
 };
 
@@ -100,6 +104,24 @@ std::wstring boolValue(const std::optional<bool>& value, const wchar_t* trueValu
 {
     if (!value) return L"Unavailable";
     return *value ? trueValue : falseValue;
+}
+
+std::wstring connectionValue(const StatusState& state)
+{
+    if (!state.status) return L"Unavailable";
+    auto value = boolValue(state.status->sunshineConnected, L"Connected", L"Disconnected");
+    // The address box holds what the Gateway dials; the name Sunshine reports for
+    // itself belongs here, where nobody can save it back as an address.
+    if (state.status->sunshineConnected && *state.status->sunshineConnected
+        && state.status->sunshineName) {
+        value += L" \x2014 " + widen(*state.status->sunshineName);
+    }
+    return value;
+}
+
+std::wstring countValue(const std::optional<std::uint32_t>& value)
+{
+    return value ? std::to_wstring(*value) : L"0";
 }
 
 std::wstring applicationValue(const StatusState& state)
@@ -248,6 +270,17 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
             startManagementOperation({managementipc::CommandType::Pair, {}});
             return 0;
         }
+        if (LOWORD(wParam) == PairTvCommandId) {
+            startManagementOperation({managementipc::CommandType::PairTv, {}});
+            return 0;
+        }
+        if (LOWORD(wParam) == ForgetTvsCommandId) {
+            if (MessageBoxW(window, L"Forget every paired TV? Each TV must be paired again with a new PIN, and a TV that is streaming now is disconnected.",
+                            L"Forget all TVs", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDYES) {
+                startManagementOperation({managementipc::CommandType::UnpairTvs, {}});
+            }
+            return 0;
+        }
         if (LOWORD(wParam) == UnpairCommandId) {
             if (MessageBoxW(window, L"Remove this Gateway's local Sunshine trust? Sunshine does not provide remote revocation. This keeps the Gateway identity and other hosts.",
                             L"Unpair Sunshine", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDYES) {
@@ -291,6 +324,7 @@ LRESULT ConfigurationWindow::handleMessage(HWND window, UINT message, WPARAM wPa
     case WM_DESTROY:
         window_ = nullptr;
         hostEdit_ = saveButton_ = testButton_ = pairButton_ = unpairButton_ = nullptr;
+        pairTvButton_ = forgetTvsButton_ = nullptr;
         destroyFonts();
         return 0;
     default:
@@ -308,6 +342,7 @@ void ConfigurationWindow::selectPageFromPoint(HWND window, POINT point)
     const auto index = static_cast<std::size_t>((point.y - scale(NavigationTop)) / scale(NavigationItemHeight));
     page_ = Pages[index].page;
     updateSunshineControls(window);
+    updateTvControls(window);
     statusChanged();
 }
 
@@ -339,6 +374,24 @@ void ConfigurationWindow::updateSunshineControls(HWND window)
         ShowWindow(saveButton_, sunshine ? SW_SHOW : SW_HIDE);
         ShowWindow(testButton_, sunshine ? SW_SHOW : SW_HIDE);
         updatePairingControls();
+    }
+}
+
+void ConfigurationWindow::updateTvControls(HWND window)
+{
+    const bool tvs = page_ == Page::Tvs;
+    if (tvs && !pairTvButton_) {
+        pairTvButton_ = CreateWindowExW(0, L"BUTTON", L"Pair TV", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                                        0, 0, 0, 0, window,
+                                        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(PairTvCommandId)), nullptr, nullptr);
+        forgetTvsButton_ = CreateWindowExW(0, L"BUTTON", L"Forget all TVs", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                                           0, 0, 0, 0, window,
+                                           reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ForgetTvsCommandId)), nullptr, nullptr);
+        applyDpi(window, GetDpiForWindow(window));
+    }
+    if (pairTvButton_) {
+        ShowWindow(pairTvButton_, tvs ? SW_SHOW : SW_HIDE);
+        ShowWindow(forgetTvsButton_, tvs ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -376,7 +429,8 @@ void ConfigurationWindow::applyDpi(HWND window, UINT dpi)
 {
     dpi_ = dpi ? dpi : 96;
     recreateFonts();
-    for (HWND control : {hostEdit_, saveButton_, testButton_, pairButton_, unpairButton_}) {
+    for (HWND control : {hostEdit_, saveButton_, testButton_, pairButton_, unpairButton_,
+                         pairTvButton_, forgetTvsButton_}) {
         if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(controlFont_), TRUE);
     }
     layoutControls(window);
@@ -385,7 +439,6 @@ void ConfigurationWindow::applyDpi(HWND window, UINT dpi)
 
 void ConfigurationWindow::layoutControls(HWND window)
 {
-    if (!hostEdit_) return;
     RECT client{};
     GetClientRect(window, &client);
     const int panelLeft = scale(ContentLeft);
@@ -395,6 +448,13 @@ void ConfigurationWindow::layoutControls(HWND window)
     const int controlRight = panelRight - rightMargin;
     const int controlWidth = (std::max)(scale(180), controlRight - valueLeft);
     const int controlHeight = scale(30);
+    if (pairTvButton_) {
+        const int tvButtonWidth = (controlWidth - scale(10)) / 2;
+        MoveWindow(pairTvButton_, valueLeft, scale(ContentTop + TvButtonsTop), tvButtonWidth, controlHeight, TRUE);
+        MoveWindow(forgetTvsButton_, valueLeft + tvButtonWidth + scale(10), scale(ContentTop + TvButtonsTop),
+                   tvButtonWidth, controlHeight, TRUE);
+    }
+    if (!hostEdit_) return;
     const int editTop = scale(ContentTop + 77);
     const int buttonTop = scale(ContentTop + 122);
     const int pairingTop = scale(ContentTop + 162);
@@ -442,6 +502,20 @@ void ConfigurationWindow::startManagementOperation(managementipc::Command comman
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 try { result = managementProvider_({managementipc::CommandType::PairStatus, {}}); } catch (...) { result = {false, "unavailable", "Management IPC is unavailable"}; }
                 if (result.code != "pairing-in-progress") break;
+            }
+        }
+        if (command.type == managementipc::CommandType::PairTv && result.ok
+            && result.code == "tv-pairing-open" && result.pin) {
+            {
+                std::lock_guard resultLock(operationMutex_);
+                operationStatus_ = L"PIN " + widen(*result.pin)
+                    + L": enter it on the TV within two minutes. Waiting\x2026";
+            }
+            if (notificationWindow) PostMessageW(notificationWindow, ManagementResultMessage, 0, 0);
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                try { result = managementProvider_({managementipc::CommandType::PairTvStatus, {}}); } catch (...) { result = {false, "unavailable", "Management IPC is unavailable"}; }
+                if (result.code != "tv-pairing-waiting") break;
             }
         }
         {
@@ -520,7 +594,7 @@ void ConfigurationWindow::paint(HWND window)
         drawText(dc, L"Host", RECT{panel.left + scale(28), panel.top + scale(78), panel.left + (panel.right - panel.left) / 2, panel.top + scale(123)},
                  labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER);
         addRows(L"Sunshine", {
-            {L"Connection", state.status ? boolValue(state.status->sunshineConnected, L"Connected", L"Disconnected") : L"Unavailable"},
+            {L"Connection", connectionValue(state)},
             {L"Pairing", state.status ? boolValue(state.status->sunshinePaired, L"Paired", L"Not paired") : L"Unavailable"},
             {L"Running application", applicationValue(state)},
             {L"Session", state.status && state.status->sessionActive && *state.status->sessionActive ? L"Active" : L"Inactive"},
@@ -533,6 +607,25 @@ void ConfigurationWindow::paint(HWND window)
         if (!operation.empty()) {
             drawText(dc, operation, RECT{panel.left + scale(28), panel.bottom - scale(28), panel.right - scale(28), panel.bottom - scale(6)},
                      labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+    } else if (page_ == Page::Tvs) {
+        addRows(L"TVs", {
+            {L"Paired TVs", state.status ? countValue(state.status->pairedTvClients) : L"Unavailable"},
+            {L"Connected TVs", state.status ? countValue(state.status->connectedTvClients) : L"Unavailable"},
+        });
+        drawText(dc, L"A TV must be paired before it can connect.",
+                 RECT{panel.left + scale(28), scale(ContentTop + TvButtonsTop), panel.left + (panel.right - panel.left) / 2 - scale(12),
+                      scale(ContentTop + TvButtonsTop + 30)},
+                 labelFont_, theme::TextSecondary, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        std::wstring operation;
+        {
+            std::lock_guard lock(operationMutex_);
+            operation = operationStatus_;
+        }
+        if (!operation.empty()) {
+            drawText(dc, operation, RECT{panel.left + scale(28), scale(ContentTop + TvButtonsTop + 48), panel.right - scale(28),
+                                         scale(ContentTop + TvButtonsTop + 84)},
+                     sectionFont_, theme::TextPrimary, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         }
     } else if (page_ == Page::Network) {
         addRows(L"Network", {

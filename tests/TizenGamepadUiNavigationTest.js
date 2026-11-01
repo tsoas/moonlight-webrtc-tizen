@@ -51,4 +51,37 @@ actions.length = 0;
 navigator.handleGamepad(gamepad(buttons([1, 9, 12])), 120);
 assert.deepStrictEqual(actions, [], "gamepad buttons are not consumed by UI during gameplay");
 
+route = "ui";
+actions.length = 0;
+navigator.handleGamepad(gamepad(buttons([15])), 200, "gameplay");
+assert.deepStrictEqual(actions, [],
+  "an explicitly passed gameplay route must suppress UI actions");
+
+const scheduledDelays = [];
+const realSetTimeout = global.setTimeout;
+global.setTimeout = function (_callback, delay) { scheduledDelays.push(delay); return 0; };
+navigator.schedule("gameplay");
+navigator.schedule("stream-menu");
+navigator.schedule(null);
+global.setTimeout = realSetTimeout;
+navigator.timer = null;
+assert.ok(scheduledDelays[0] > 20 && scheduledDelays[0] <= 50,
+  "gameplay backs this poller off, but not so far that the next menu press feels stuck");
+assert.ok(scheduledDelays[1] < 20 && scheduledDelays[2] < 20,
+  "menus and the home screen keep the responsive cadence");
+
+const failing = global.GamepadUiNavigation.create({
+  route: function () { throw new Error("route lookup blew up"); },
+  navigate: function () {},
+  activate: function () {},
+  back: function () {},
+});
+const failingScheduled = [];
+global.setTimeout = function (_callback, delay) { failingScheduled.push(delay); return 0; };
+failing.poll();
+global.setTimeout = realSetTimeout;
+failing.timer = null;
+assert.strictEqual(failingScheduled.length, 1,
+  "a throwing UI action must still leave the poller scheduled");
+
 console.log("Tizen gamepad UI navigation tests passed");

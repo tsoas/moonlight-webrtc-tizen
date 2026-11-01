@@ -43,26 +43,31 @@ int main()
         gateway::serviceipc::StatusSnapshot snapshot;
         snapshot.sunshineConnected = true;
         snapshot.sunshinePaired = true;
-        snapshot.sunshineHost = "Sunshine-PC";
+        snapshot.sunshineHost = "192.168.1.20:27786";
+        snapshot.sunshineName = "Sunshine-PC";
         snapshot.runningApplicationId = "7";
         snapshot.runningApplicationName = "Desktop";
         snapshot.sessionActive = true;
         snapshot.connectedTvClients = 1;
+        snapshot.pairedTvClients = 2;
         const auto response = nlohmann::json::parse(
             gateway::serviceipc::makeStatusResponse(snapshot));
         require(response.at("version") == gateway::serviceipc::ProtocolVersion
                     && response.at("type") == "status"
                     && response.at("serviceRunning") == true
                     && response.at("sunshinePaired") == true
-                    && response.at("sunshineHost") == "Sunshine-PC"
+                    && response.at("sunshineHost") == "192.168.1.20:27786"
+                    && response.at("sunshineName") == "Sunshine-PC"
                     && response.at("runningApplicationId") == "7"
                     && response.at("runningApplicationName") == "Desktop"
-                    && response.at("connectedTvClients") == 1,
+                    && response.at("connectedTvClients") == 1
+                    && response.at("pairedTvClients") == 2,
                 "IPC status response did not preserve supported snapshot fields");
 
         const auto minimal = nlohmann::json::parse(
             gateway::serviceipc::makeStatusResponse({}));
-        require(!minimal.contains("sunshineHost") && !minimal.contains("runningApplicationId"),
+        require(!minimal.contains("sunshineHost") && !minimal.contains("sunshineName")
+                    && !minimal.contains("runningApplicationId"),
                 "IPC status response invented unavailable values");
 
         const auto error = nlohmann::json::parse(

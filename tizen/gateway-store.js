@@ -3,6 +3,8 @@
 
   const STORAGE_KEY = "moonlight-webrtc.client.gateways.v1";
   const DEFAULT_PORT = 8000;
+  const normalizeMacAddress = global.WakeOnLan.normalizeMacAddress;
+  const isValidCredentials = global.GatewayAuth.isValidCredentials;
 
   function isIpv4(host) {
     const octets = typeof host === "string" ? host.split(".") : [];
@@ -21,7 +23,18 @@
     const host = candidate.host;
     const name = typeof candidate.name === "string" && candidate.name.trim()
       ? candidate.name.trim().slice(0, 96) : "Gateway " + host;
-    return { id: host + ":" + String(port), host: host, port: port, name: name };
+    const gateway = { id: host + ":" + String(port), host: host, port: port, name: name };
+    // Learned from the Gateway while it is on, so that it can be woken when it is not.
+    const macAddress = normalizeMacAddress(candidate.macAddress);
+    if (macAddress) {
+      gateway.macAddress = macAddress;
+    }
+    // Issued by the Gateway when this TV paired with it; kept only as a complete pair.
+    if (isValidCredentials(candidate.clientId, candidate.clientSecret)) {
+      gateway.clientId = candidate.clientId;
+      gateway.clientSecret = candidate.clientSecret;
+    }
+    return gateway;
   }
 
   function normalizeList(candidate) {

@@ -44,6 +44,9 @@ std::string makeStatusResponse(const StatusSnapshot& snapshot)
     if (snapshot.sunshineHost) {
         response["sunshineHost"] = *snapshot.sunshineHost;
     }
+    if (snapshot.sunshineName) {
+        response["sunshineName"] = *snapshot.sunshineName;
+    }
     if (snapshot.runningApplicationId) {
         response["runningApplicationId"] = *snapshot.runningApplicationId;
     }
@@ -55,6 +58,9 @@ std::string makeStatusResponse(const StatusSnapshot& snapshot)
     }
     if (snapshot.connectedTvClients) {
         response["connectedTvClients"] = *snapshot.connectedTvClients;
+    }
+    if (snapshot.pairedTvClients) {
+        response["pairedTvClients"] = *snapshot.pairedTvClients;
     }
     return response.dump();
 }

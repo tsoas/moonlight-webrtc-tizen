@@ -149,6 +149,7 @@
       dot.className = "status-dot";
       dot.classList.toggle("is-connected", gateway.state === "Online");
       dot.classList.toggle("is-error", gateway.state === "Offline");
+      dot.classList.toggle("is-sunshine-unavailable", gateway.state === "Sunshine unavailable");
       const status = document.createElement("span");
       status.textContent = String(gateway.state || "Offline");
       statusLine.appendChild(dot);

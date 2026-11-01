@@ -6,6 +6,10 @@ samples/*.opus
 tizen/.buildResult/
 tizen/Debug/
 tizen/tizen_web_project.yaml
+tizen/wasm/wake-on-lan.js
+tizen/wasm/wake-on-lan.*.js
+tizen/wasm/*.wasm
+tizen/wasm/*.mem
 /.tizen-install/
 /tizen/Release/
 /dist/

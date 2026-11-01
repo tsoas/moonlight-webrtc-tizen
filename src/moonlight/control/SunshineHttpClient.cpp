@@ -229,6 +229,11 @@ const std::string& SunshineHttpClient::host() const
     return host_;
 }
 
+std::uint16_t SunshineHttpClient::httpPort() const
+{
+    return httpPort_;
+}
+
 std::uint16_t SunshineHttpClient::httpsPort() const
 {
     return httpsPort_;
@@ -369,7 +374,11 @@ SunshineServerInfo SunshineHttpClient::getServerInfo(bool authenticated,
         : requestHttp("serverinfo", {}, timeout);
     auto serverInfo = parseServerInfoXml(xml);
     if (serverInfo.httpsPort == 0) {
-        serverInfo.httpsPort = 47984;
+        // Sunshine derives HTTPS from the same base port as HTTP. Falling back to the
+        // default pair would aim TLS at a port a relocated host never opened.
+        serverInfo.httpsPort = httpPort_ > DefaultSunshineHttpsPortOffset
+            ? static_cast<std::uint16_t>(httpPort_ - DefaultSunshineHttpsPortOffset)
+            : httpPort_;
     }
     setHttpsPort(serverInfo.httpsPort);
     return serverInfo;
